@@ -29,11 +29,12 @@ for project in android_world MobileWorld; do
   fi
 done
 
-if ! git -C "$eval_dir/android_world" apply --reverse --unidiff-zero --check \
-  "$eval_dir/android_world_adb_path.patch" 2>/dev/null; then
-  git -C "$eval_dir/android_world" apply --unidiff-zero \
-    "$eval_dir/android_world_adb_path.patch"
-fi
+for patch in android_world_adb_path.patch android_world_grpc_port.patch; do
+  if ! git -C "$eval_dir/android_world" apply --reverse --unidiff-zero --check \
+    "$eval_dir/$patch" 2>/dev/null; then
+    git -C "$eval_dir/android_world" apply --unidiff-zero "$eval_dir/$patch"
+  fi
+done
 
 if [[ ! -x "$eval_dir/android_world/.venv/bin/python" ]]; then
   uv venv --python 3.11 "$eval_dir/android_world/.venv"

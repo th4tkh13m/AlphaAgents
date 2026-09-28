@@ -1,0 +1,20 @@
+diff --git a/minimal_task_runner.py b/minimal_task_runner.py
+index 010a0b4..5a6dfaa 100644
+--- a/minimal_task_runner.py
++++ b/minimal_task_runner.py
+@@ -77,0 +78,3 @@ _DEVICE_CONSOLE_PORT = flags.DEFINE_integer(
++_GRPC_PORT = flags.DEFINE_integer(
++    'grpc_port', 8554, 'gRPC port of the running Android emulator.'
++)
+@@ -91,0 +95 @@ def _main() -> None:
++      grpc_port=_GRPC_PORT.value,
+diff --git a/run.py b/run.py
+index ac79006..a8f08aa 100644
+--- a/run.py
++++ b/run.py
+@@ -83,0 +84,3 @@ _DEVICE_CONSOLE_PORT = flags.DEFINE_integer(
++_GRPC_PORT = flags.DEFINE_integer(
++    'grpc_port', 8554, 'gRPC port of the running Android emulator.'
++)
+@@ -202,0 +206 @@ def _main() -> None:
++      grpc_port=_GRPC_PORT.value,
