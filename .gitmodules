@@ -1,0 +1,8 @@
+[submodule "eval/android_world"]
+	path = eval/android_world
+	url = https://github.com/google-research/android_world.git
+	ignore = dirty
+[submodule "eval/MobileWorld"]
+	path = eval/MobileWorld
+	url = https://github.com/Tongyi-MAI/MobileWorld.git
+	ignore = untracked

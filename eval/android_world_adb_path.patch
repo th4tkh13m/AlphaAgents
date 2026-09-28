@@ -1,0 +1,20 @@
+diff --git a/minimal_task_runner.py b/minimal_task_runner.py
+index 010a0b4..d5d25a4 100644
+--- a/minimal_task_runner.py
++++ b/minimal_task_runner.py
+@@ -23,0 +24 @@ import os
++import shutil
+@@ -43,0 +45,3 @@ def _find_adb_directory() -> str:
++  adb_on_path = shutil.which('adb')
++  if adb_on_path:
++    return adb_on_path
+diff --git a/run.py b/run.py
+index ac79006..78ac444 100644
+--- a/run.py
++++ b/run.py
+@@ -24,0 +25 @@ import os
++import shutil
+@@ -49,0 +51,3 @@ def _find_adb_directory() -> str:
++  adb_on_path = shutil.which('adb')
++  if adb_on_path:
++    return adb_on_path
