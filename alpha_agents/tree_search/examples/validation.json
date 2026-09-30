@@ -1,0 +1,8 @@
+{
+  "validation": [
+    {
+      "type": "changed_pytest",
+      "timeout": 300
+    }
+  ]
+}

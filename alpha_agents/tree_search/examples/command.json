@@ -1,0 +1,32 @@
+{
+  "harness": {
+    "type": "command",
+    "source": "toy_harness",
+    "evaluator_cwd": ".",
+    "evaluate_command": [
+      "python3",
+      "evaluate_toy.py",
+      "{workspace}"
+    ],
+    "instructions": "Improve agent.py. The external evaluator tests solve(x) == x + 1.",
+    "resources": [
+      "local"
+    ],
+    "timeout": 30
+  },
+  "mutation": {
+    "type": "command",
+    "command": [
+      "python3",
+      "mutate_toy.py",
+      "{workspace}"
+    ],
+    "timeout": 30
+  },
+  "search": {
+    "max_children": 1,
+    "workers": 1,
+    "selection": "best",
+    "scheduling": "synchronous"
+  }
+}

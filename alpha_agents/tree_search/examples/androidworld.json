@@ -1,0 +1,40 @@
+{
+  "harness": {
+    "type": "androidworld",
+    "source": "/path/to/mobile-agent-start",
+    "config": {
+      "androidworld_api_url": "http://localhost:5000",
+      "base_url": "http://localhost:8000/v1",
+      "model": "your-model",
+      "androidworld_devices": [
+        "android_world_0"
+      ],
+      "python": "/path/to/agent/.venv/bin/python",
+      "venv_source": "/path/to/agent/.venv",
+      "score_stage": "evaluation",
+      "protected_paths": [
+        "tasks/**"
+      ]
+    }
+  },
+  "mutation": {
+    "type": "codex",
+    "timeout": 3600
+  },
+  "search": {
+    "max_children": 20,
+    "workers": 1,
+    "batch_size": 2,
+    "scheduling": "synchronous",
+    "selection": "score_child_prop",
+    "archive_policy": "keep_all",
+    "seed": 42
+  },
+  "validation": [
+    {
+      "type": "changed_pytest",
+      "python": "/path/to/agent/.venv/bin/python",
+      "timeout": 300
+    }
+  ]
+}

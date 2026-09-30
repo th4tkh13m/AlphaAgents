@@ -1,0 +1,5 @@
+# Codex mutation backend; command-only search has no runtime dependencies.
+openai-codex==0.159.2
+
+# Regression tests
+pytest>=8,<10
