@@ -29,7 +29,12 @@ class AndroidWorldBridge:
         self.config = {**defaults, **config, "harness_dir": str(self.source)}
         if sys.platform == "win32":
             raise RuntimeError("AndroidWorld bridge requires Linux/WSL")
-        for key in ("androidworld_api_url", "base_url", "model"):
+        required = ["base_url", "model"]
+        if self.config["evaluation_runner"] == "artemis_local":
+            required += ["androidworld_root", "adb_path", "console_port", "grpc_port"]
+        else:
+            required += ["androidworld_api_url"]
+        for key in required:
             if not self.config.get(key):
                 raise ValueError(f"AndroidWorld requires explicit {key}")
         self.config["task_file"] = str(Path(self.config["task_file"]).resolve())
@@ -43,6 +48,16 @@ class AndroidWorldBridge:
         if len(devices) != len(set(devices)):
             raise ValueError("Device IDs must be unique")
         self.config["androidworld_devices"] = devices
+        if self.config["evaluation_runner"] == "artemis_local":
+            if len(devices) != 1:
+                raise ValueError(
+                    "Artemis local runner requires exactly one assigned ADB device"
+                )
+            for key in ("androidworld_root", "adb_path"):
+                self.config[key] = str(Path(self.config[key]).resolve())
+            from .artemis import preserve_source
+
+            self.source = preserve_source(self.source)
         self.pool = queue.Queue()
         for device in devices or [None]:
             self.pool.put(device)
@@ -69,6 +84,11 @@ class AndroidWorldBridge:
         runtime.expose_agent_venv(
             candidate.workspace, resource.get("venv_source", str(self.source / ".venv"))
         )
+        if resource["evaluation_runner"] == "artemis_local":
+            from .artemis import expose_preserved_modules, mutation_context
+
+            expose_preserved_modules(candidate)
+            return mutation_context(candidate, parent, resource)
         return MutationContext(
             "Investigate parent evidence and improve the mobile harness's general reliability.",
             "AndroidWorld guidance:\n"
@@ -106,6 +126,13 @@ class AndroidWorldBridge:
         value = runtime.performance(summary, stage)
         evidence = (str(candidate.directory / "stages"),)
         metrics = value
+        if resource["evaluation_runner"] == "artemis_local":
+            metrics = {
+                **value,
+                "task_results": summary.get("task_results", []),
+                "errors": summary.get("errors", []),
+                "model": resource["model"],
+            }
         if (
             value.get("evaluation_status") != "completed"
             or value.get("total_submitted_instances", 0) <= 0

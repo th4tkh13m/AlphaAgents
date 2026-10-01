@@ -13,3 +13,51 @@ All candidates in a run use the same `score_stage`, defaulting to `evaluation`. 
 Evaluator subprocesses run through the package module entrypoint, with the package root propagated to their environment. Evaluation checkpoints and episode cleanup artifacts are preserved under each candidate. Task recovery behavior is covered by the continuation and cleanup regression tests.
 
 The mutating agent performs test cases and a representative harness test run using the assigned resource. No validator checks for saved experiment-summary files. Independent benchmark evaluation and its artifacts remain owned by the bridge.
+
+## Artemis with a local AndroidWorld emulator
+
+Set `evaluation_runner` to `artemis_local` to evaluate Artemis through its public
+`Agent` and `Builders` APIs. `artemis_runner.py` is a trusted bridge-owned runner
+outside the editable candidate. Both the original Artemis and Mobile-Agent
+directories stay unchanged; DGM mutations apply to disposable candidate copies.
+No AndroidWorld HTTP gateway or runner inside the harness is required.
+
+The core excludes `output*` when copying source. Artemis has required modules
+and prompts with those names, so this bridge builds a separate source snapshot
+with tracked backing files in `.dgm_preserved_modules`. Candidate preparation
+exposes ignored symlinks at the original paths. The mapping tells the mutator
+which backing files to edit; those edits are captured in ordinary child patches.
+Neither the core copying rules nor the original harness files are changed.
+
+In the AndroidWorld bridge configuration, supply:
+
+- `python` and `venv_source`: a Python 3.12 environment containing Artemis and AndroidWorld dependencies.
+- `androidworld_root`: the trusted AndroidWorld checkout, outside the candidate.
+- `adb_path`, `console_port`, `grpc_port`: the installed ADB executable and running emulator ports.
+- `androidworld_devices`: exactly one ADB serial, such as `emulator-5560`.
+- `base_url` and `model`: the model endpoint and its advertised model ID.
+- `task_file`, `score_stage`, `seed`, `task_timeout`, and `stage_timeout`: the fixed evaluation contract.
+
+Use absolute paths in this configuration. `llm_timeout` configures supported
+Artemis role timeouts and the stream chunk timeout; the outer process timeout
+kills the evaluator process group. The original harness decides its remaining
+LLM behavior. Task rewards come from the trusted AndroidWorld checkout.
+
+Each candidate saves `stages/<stage>/evaluation_request.json`, `manifest.json`,
+`summary.json`, `runner/process.json`, stdout/stderr, checkpoints, and Artemis
+traces. The controller receives a normalized score plus individual task results
+and errors. Incomplete, duplicate, mismatched, timed-out, or exception-bearing
+results are diagnostics with no score. A valid completed task with reward zero
+is a scored failure, distinct from an evaluator failure.
+
+The mutator receives the parent evaluation, copied `.dgm_parent_evidence`, the
+assigned serial and ports, the model endpoint, and a representative run command
+that imports its candidate copy. An ignored `venv` symlink exposes dependencies.
+The benchmark checkout and bridge runner remain outside its editable workspace.
+
+Run bridge contract and repository regression tests with:
+
+```bash
+python -m pytest -q alpha_agents/tree_search/tests \
+  alpha_agents/tree_search/bridges/androidworld/test_artemis.py
+```

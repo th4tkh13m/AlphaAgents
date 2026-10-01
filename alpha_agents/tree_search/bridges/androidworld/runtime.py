@@ -315,6 +315,10 @@ def _partial_trajectory_steps(task_dir):
 
 
 def run_stage(worktree, artifact_dir, stage, config, lock_root):
+    if config.get("evaluation_runner") == "artemis_local":
+        from .artemis import run_stage as run_artemis_stage
+
+        return run_artemis_stage(worktree, artifact_dir, stage, config, lock_root)
     if config.get("evaluation_runner") == "mobile_agent_http":
         from .evaluation import supervised_stage
 
