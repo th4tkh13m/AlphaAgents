@@ -15,6 +15,7 @@ from pathlib import Path
 from ...infrastructure.process import execute
 from .evaluation import atomic_json
 from .runtime import evaluation_lock, read_json
+from .task_outcomes import is_bounded_agent_failure
 
 ROLES = (
     "planner",
@@ -184,7 +185,8 @@ def normalize_manifest(manifest, tasks, config, process):
     for episode in episodes:
         score = episode.get("success")
         reward = episode.get("androidworld_reward")
-        valid = (
+        agent_failed = is_bounded_agent_failure(episode)
+        valid = agent_failed or (
             isinstance(score, (float, int))
             and not isinstance(score, bool)
             and math.isfinite(score)
@@ -205,7 +207,9 @@ def normalize_manifest(manifest, tasks, config, process):
                 "task_name": episode.get("template"),
                 "score": score if valid else None,
                 "success": bool(valid and score > 0.5),
-                "outcome_status": "completed" if valid else "invalid_runtime",
+                "outcome_status": (
+                    "agent_failed" if agent_failed else "completed" if valid else "invalid_runtime"
+                ),
                 "duration_sec": json_safe(episode.get("seconds", 0)),
             }
         )

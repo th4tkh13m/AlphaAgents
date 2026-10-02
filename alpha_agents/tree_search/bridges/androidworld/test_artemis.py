@@ -10,6 +10,7 @@ from alpha_agents.tree_search.bridges.androidworld import artemis
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
 from alpha_agents.tree_search.core.contracts import Candidate
 from alpha_agents.tree_search.core.workspace import materialize
+from alpha_agents.tree_search.bridges.androidworld.task_outcomes import bounded_agent_failure
 
 
 def settings(tmp_path):
@@ -54,6 +55,74 @@ def manifest(config, score=1):
 
 
 PROCESS = {"returncode": 0, "timed_out": False}
+
+
+GraphLimit = type("GraphRecursionError", (Exception,), {"__module__": "langgraph.errors"})
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError(), TimeoutError("LLM call timed out after 180 seconds."), GraphLimit("limit 100")],
+)
+def test_bounded_agent_failure_preserves_other_tasks_and_exception(tmp_path, monkeypatch, error):
+    config = settings(tmp_path)
+    tasks = ["ClockStopWatchRunning", "SecondTask"]
+    Path(config["task_file"]).write_text(json.dumps({"evaluation": tasks}))
+    value = manifest(config)
+    value["tasks"] = tasks
+    failure = {
+        "template": tasks[1], "index": 0, "success": 0.0,
+        "exception": f"{type(error).__name__}: {error}", "seconds": 180,
+        **bounded_agent_failure(error, "agent_execution"),
+    }
+    value["episodes"].append(failure)
+    summary = artemis.normalize_manifest(value, tasks, config, PROCESS)
+    from alpha_agents.tree_search.bridges.androidworld import runtime
+
+    monkeypatch.setattr(runtime, "run_stage", lambda *args: summary)
+    bridge = AndroidWorldBridge(tmp_path, config)
+    with bridge.lease() as resource:
+        result = bridge.evaluate(Candidate("initial", None, tmp_path, ""), resource)
+    assert result.status == "completed" and result.score == 0.5
+    assert result.metrics["total_submitted_instances"] == 2
+    measured = result.metrics["task_results"][1]
+    assert measured["score"] == 0 and measured["outcome_status"] == "agent_failed"
+    assert measured["exception"] == failure["exception"]
+    assert measured["androidworld_reward"] is None
+    assert not summary["errors"]
+
+
+@pytest.mark.parametrize("phase", ["setup", "answer_submission", "grading", "teardown"])
+def test_timeout_outside_agent_execution_still_invalidates_evidence(tmp_path, phase):
+    error = TimeoutError("LLM call timed out after 180 seconds.")
+    assert not bounded_agent_failure(error, phase)
+    config = settings(tmp_path)
+    value = manifest(config, score=0)
+    value["episodes"][0].update(exception=str(error), failure_phase=phase)
+    summary = artemis.normalize_manifest(value, value["tasks"], config, PROCESS)
+    assert summary["status"] == "invalid_runtime"
+
+
+@pytest.mark.parametrize("defect", ["nonzero", "wrong_phase", "wrong_error", "fake_reward"])
+def test_agent_failure_marker_cannot_hide_invalid_evidence(tmp_path, defect):
+    config = settings(tmp_path)
+    value = manifest(config, score=0)
+    episode = value["episodes"][0]
+    error = TimeoutError("LLM call timed out after 180 seconds.")
+    episode.update(bounded_agent_failure(error, "agent_execution"), exception=f"TimeoutError: {error}")
+    if defect == "nonzero":
+        episode["success"] = 1
+    elif defect == "wrong_phase":
+        episode["failure_phase"] = "grading"
+    elif defect == "wrong_error":
+        episode["exception"] = "RuntimeError: unavailable"
+    else:
+        episode["androidworld_reward"] = 1
+    assert artemis.normalize_manifest(value, value["tasks"], config, PROCESS)["status"] == "invalid_runtime"
+
+
+def test_unknown_agent_error_is_not_a_bounded_failure():
+    assert not bounded_agent_failure(RuntimeError("broken evaluator integration"), "agent_execution")
 
 
 @pytest.mark.parametrize("score", [0, 1])

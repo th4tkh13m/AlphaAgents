@@ -47,8 +47,15 @@ Each candidate saves `stages/<stage>/evaluation_request.json`, `manifest.json`,
 `summary.json`, `runner/process.json`, stdout/stderr, checkpoints, and Artemis
 traces. The controller receives a normalized score plus individual task results
 and errors. Incomplete, duplicate, mismatched, timed-out, or exception-bearing
-results are diagnostics with no score. A valid completed task with reward zero
-is a scored failure, distinct from an evaluator failure.
+results are diagnostics with no score, except for explicitly identified agent
+execution timeouts and graph transition limits. Those bounded agent failures
+receive a task score of zero and retain the candidate's aggregate score. Their
+exceptions remain in the task results; `androidworld_reward` is null because
+the grader did not run. The trusted runner records the failure phase and kind.
+Setup, answer-submission, grading, cleanup, and evaluator failures remain
+invalid evidence. Historical manifests without that classification are not
+silently reinterpreted. A valid completed task with reward zero is also a scored
+failure, distinct from an evaluator failure.
 
 The mutator receives the parent evaluation, copied `.dgm_parent_evidence`, the
 assigned serial and ports, the model endpoint, and a representative run command

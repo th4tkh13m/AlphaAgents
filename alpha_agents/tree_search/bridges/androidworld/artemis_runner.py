@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ARTEMIS_ROOT))
 sys.path.insert(0, str(ANDROID_WORLD_ROOT))
 
+from task_outcomes import bounded_agent_failure
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -271,6 +273,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     "seed": task.params.get("seed"),
                     "goal": task.goal,
                 }
+                failure_phase = "setup"
                 try:
                     await agent.init(device_serial=args.serial)
                     task.initialize_task(env)
@@ -283,14 +286,18 @@ async def main_async(args: argparse.Namespace) -> int:
                         max(100, int(args.artemis_steps_multiplier * task.complexity))
                     )
                     request.with_trace_recording(enabled=True, path=str(traces))
+                    failure_phase = "agent_execution"
                     await asyncio.wait_for(
                         agent.run_task(request=request.build()),
                         timeout=args.task_timeout_seconds,
                     )
+                    failure_phase = "answer_submission"
                     artemis_run = agent._tasks[-1]
                     artemis_completed = artemis_run.status == "completed"
+                    failure_phase = "grading"
                     androidworld_reward = float(task.is_successful(env))
                     score = androidworld_reward if artemis_completed else 0.0
+                    failure_phase = "teardown"
                     task.tear_down(env)
                     task_record["androidworld_reward"] = androidworld_reward
                     task_record["artemis_status"] = artemis_run.status
@@ -308,8 +315,10 @@ async def main_async(args: argparse.Namespace) -> int:
                     task_record.update(
                         success=0.0,
                         exception=f"{type(exc).__name__}: {exc}",
+                        failure_phase=failure_phase,
                         seconds=round(time.time() - started, 2),
                     )
+                    task_record.update(bounded_agent_failure(exc, failure_phase))
                     failures += 1
                 finally:
                     if task.initialized:
