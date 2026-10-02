@@ -1,0 +1,21 @@
+{
+  "planner": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "summarizer": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "operator": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "validator_pixel_safety_net": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "operator_summarizer": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "log_reader_sub_agent": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "log_analyzer": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "diagnoser": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "checker": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "planner_avatar": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "history_analyzer_expert": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "diagnoser_expert": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "explorer": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+  "utils": {
+    "outputter": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+    "hopper": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+    "video_analyzer": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}},
+    "object_detector": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8", "fallback": {"provider": "openai", "model": "Qwen/Qwen3.8-27B-FP8"}}
+  }
+}

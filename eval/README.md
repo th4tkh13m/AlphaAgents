@@ -60,3 +60,29 @@ cd eval/MobileWorld
 ```
 
 The MobileWorld Docker environment uses privileged containers. Its README provides the full evaluation arguments and optional credentials for user interaction and MCP tasks.
+
+## Direct harness evaluation
+
+The local integrations use this directory's AndroidWorld checkout for tasks and rewards:
+
+- `run_mobile_agent_v35.py`: cleaned Mobile-Agent v3.5 from `harness/mobile-gui/mobile_agent`. See `harness/mobile-gui/README.md` for the invocation. Optional `--disable_thinking`, `--llm_timeout`, and `--llm_max_tokens` configure Qwen requests in the evaluation runner. The output limit defaults to 200,000 tokens. The wrapper validates responses and retries failures; prompts and agent decision logic retain upstream behavior.
+- `run_artemis_androidworld.py`: unchanged working Artemis from `harness/artemis`. See `harness/artemis/MIGRATION.md` for its Python 3.12 dependency environment and invocation. `artemis_androidworld_qwen.jsonc` selects the local Qwen model for every role.
+
+Supply matching emulator console/gRPC ports. The default console/ADB ports may be occupied by other local services. For an isolated headless emulator, add `-port 5560 -grpc 8560 -no-window -no-audio -no-metrics` to the startup command above. Use separate AVDs and port pairs when evaluating agents concurrently.
+
+The evaluation-only `mobile_agent_env.py` preserves Mobile-Agent's coordinate-based swipe endpoints and 500 ms duration. Other actions and environment operations delegate directly to AndroidWorld. Its tests run with `eval/android_world/.venv/bin/python -m pytest -q eval/tests/test_mobile_agent_env.py`.
+
+### Harness verification on 2026-09-30
+
+Two tasks were evaluated against AndroidWorld revision `e3fea3ccc69787570e282c99573298f1c3019a34` using `Qwen/Qwen3.8-27B-FP8` at `http://localhost:8001/v1`. This is a smoke evaluation, not a full benchmark or a controlled agent comparison (Mobile-Agent seed 30; Artemis seed 42).
+
+| Harness | ClockStopWatchRunning | ContactsAddContact |
+| --- | --- | --- |
+| Mobile-Agent v3.5, Qwen thinking disabled | Reward 1.0, 4 steps | Reward 0.0, 12-step limit |
+| Artemis, source default agent config | Reward 1.0 | Reward 1.0 |
+
+The configured Mobile-Agent run finished both episodes without exceptions. Its upstream-default Qwen run encountered malformed reflector responses on both tasks; the successful smoke used `--disable_thinking --llm_timeout=180 --llm_max_tokens=4096` in the evaluation runner. Artemis completed both tasks without exceptions, while its default transcript/visual summary paths emitted missing Gemini credential warnings and fell back to existing behavior.
+
+All 67 repository regression tests and 3 evaluation adapter tests passed. The coordinate swipe adapter also changed the screen through the real eval AndroidWorld environment. A source audit confirmed all 797 copied Artemis files were identical to `/data/khiem/Reproduce/artemis`, and the four retained Mobile-Agent modules changed only imports. Bundled benchmark code was removed; upstream task-specific agent hints remain as requested.
+
+Detailed manifests, checkpoints, screenshots, traces, logs, source hashes, and `results_summary.json` are local artifacts under ignored `eval/results/harness_validation/`.
