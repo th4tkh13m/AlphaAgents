@@ -27,6 +27,8 @@ class CodexMutator:
             "model": self.model,
             "effort": self.effort,
             "timeout": self.timeout,
+            "sandbox": "full_access",
+            "approval_policy": "never",
             "prompt_template": str(self.prompt_template)
             if self.prompt_template
             else None,

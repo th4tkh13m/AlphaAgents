@@ -14,7 +14,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-STAGES = ("screen", "selection", "evaluation")
+from .task_sets import STAGES as STAGES
+from .task_sets import stage_tasks
 
 
 def read_json(path):
@@ -323,13 +324,19 @@ def run_stage(worktree, artifact_dir, stage, config, lock_root):
         from .evaluation import supervised_stage
 
         return supervised_stage(worktree, artifact_dir, stage, config, lock_root)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    external_stage = "evaluation" if stage == "confirmation" else stage
+    normalized_manifest = artifact_dir / "task_sets.json"
+    write_json(
+        normalized_manifest, {external_stage: stage_tasks(config["task_file"], stage)}
+    )
     command = [
         config.get("python", sys.executable),
         "scripts/evaluate_androidworld.py",
         "--task-file",
-        config["task_file"],
+        str(normalized_manifest),
         "--subset-split",
-        stage,
+        external_stage,
         "--seed",
         str(config["seed"]),
         "--output-dir",

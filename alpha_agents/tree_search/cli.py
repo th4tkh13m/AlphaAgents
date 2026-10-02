@@ -112,17 +112,30 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--stop-after-children",
+        type=int,
+        help="Stop after this many additional child lifecycles, keeping the total search budget for resume",
+    )
+    parser.add_argument(
         "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO"
     )
     args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
-        level=args.log_level, format="%(asctime)s %(levelname)s %(message)s"
+        level=args.log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(args.output / "search.log", delay=True),
+        ],
     )
     config = resolve_config(
         json.loads(args.config.read_text(encoding="utf-8")),
         args.config.resolve().parent,
     )
-    state = build(config, args.output).run(resume=args.resume)
+    state = build(config, args.output).run(
+        resume=args.resume, stop_after_children=args.stop_after_children
+    )
     print(
         json.dumps(
             {

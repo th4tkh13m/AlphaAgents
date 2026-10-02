@@ -1,0 +1,37 @@
+{
+  "harness": {
+    "type": "androidworld",
+    "source": "/path/to/artemis",
+    "config": {
+      "evaluation_runner": "artemis_local",
+      "python": "/path/to/artemis-dependencies/bin/python",
+      "venv_source": "/path/to/artemis-dependencies",
+      "androidworld_root": "/path/to/android_world",
+      "adb_path": "/path/to/android-sdk/platform-tools/adb",
+      "base_url": "http://localhost:8001/v1",
+      "model": "your-advertised-model",
+      "task_file": "tasks.json",
+      "score_stage": "selection",
+      "seed": 42,
+      "task_timeout": 1800,
+      "stage_timeout": 36000,
+      "androidworld_devices": ["emulator-5560", "emulator-5562", "emulator-5564", "emulator-5566"],
+      "androidworld_device_ports": {
+        "emulator-5560": {"console_port": 5560, "grpc_port": 8560},
+        "emulator-5562": {"console_port": 5562, "grpc_port": 8561},
+        "emulator-5564": {"console_port": 5564, "grpc_port": 8562},
+        "emulator-5566": {"console_port": 5566, "grpc_port": 8563}
+      }
+    }
+  },
+  "mutation": {"type": "codex", "timeout": 3600},
+  "search": {
+    "max_children": 20,
+    "workers": 4,
+    "batch_size": 4,
+    "scheduling": "asynchronous",
+    "selection": "score_child_prop",
+    "archive_policy": "keep_all",
+    "seed": 42
+  }
+}

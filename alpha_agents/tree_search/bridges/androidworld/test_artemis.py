@@ -2,6 +2,7 @@
 
 import json
 import shutil
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -125,6 +126,29 @@ def test_unknown_agent_error_is_not_a_bounded_failure():
     assert not bounded_agent_failure(RuntimeError("broken evaluator integration"), "agent_execution")
 
 
+def test_runner_can_request_official_emulator_setup(tmp_path):
+    config = settings(tmp_path)
+    config["task_timeout"] = 30
+    config["perform_emulator_setup"] = True
+    command = artemis.runner_command(
+        tmp_path, tmp_path / "results", ["ClockStopWatchRunning"], config
+    )
+    assert "--perform-emulator-setup" in command
+
+
+def test_optional_routes_use_the_assigned_model_including_fallback(tmp_path):
+    config = settings(tmp_path)
+    output = tmp_path / "runtime"
+    output.mkdir()
+    env = artemis.execution_environment(tmp_path, output, config)
+    llm = json.loads(Path(env["DGM_ARTEMIS_LLM_CONFIG"]).read_text())
+    for name in ("planner_validation", "history_analyzer", "output_analyzer"):
+        assert llm[name]["provider"] == "openai"
+        assert llm[name]["model"] == config["model"]
+        assert llm[name]["fallback"] == {"provider": "openai", "model": config["model"]}
+    assert env["OPENAI_BASE_URL"] == config["base_url"]
+
+
 @pytest.mark.parametrize("score", [0, 1])
 def test_authoritative_reward_maps_to_controller_score(tmp_path, monkeypatch, score):
     config = settings(tmp_path)
@@ -213,6 +237,15 @@ def test_mutator_gets_parent_results_candidate_command_and_assigned_device(tmp_p
             }
         )
     )
+    runtime = initial.directory / "stages/selection/runtime"
+    (runtime / "images").mkdir(parents=True)
+    screenshot = runtime / "images/screen.jpg"
+    screenshot.write_bytes(b"saved screenshot")
+    with sqlite3.connect(runtime / "data_engine.db") as database:
+        database.execute(
+            "CREATE TABLE steps (step_number INTEGER, pre_image_name TEXT, action_taken TEXT)"
+        )
+        database.execute("INSERT INTO steps VALUES (1, 'screen', 'tap')")
     child = materialize(bridge.source, runs, "child", initial)
     with bridge.lease() as resource:
         context = bridge.prepare(child, initial, resource)
@@ -226,6 +259,15 @@ def test_mutator_gets_parent_results_candidate_command_and_assigned_device(tmp_p
         in context.evidence["experiment_command"]
     )
     assert (child.workspace / ".dgm_parent_evidence/candidate.json").is_file()
+    copied_runtime = child.workspace / ".dgm_parent_evidence/stages/selection/runtime"
+    with sqlite3.connect(
+        f"file:{copied_runtime / 'data_engine.db'}?mode=ro", uri=True
+    ) as database:
+        step, image, action = database.execute("SELECT * FROM steps").fetchone()
+    assert (step, action) == (1, "tap")
+    assert (
+        copied_runtime / "images" / f"{image}.jpg"
+    ).read_bytes() == screenshot.read_bytes()
     assert not (source / "venv").exists()
 
 
@@ -264,5 +306,5 @@ def test_output_modules_survive_core_snapshot_and_candidate_patches(tmp_path):
 def test_local_bridge_rejects_unmapped_multiple_devices(tmp_path):
     config = settings(tmp_path)
     config["androidworld_devices"] = ["emulator-5560", "emulator-5562"]
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="port mapping"):
         AndroidWorldBridge(tmp_path, config)

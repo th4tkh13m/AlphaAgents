@@ -52,7 +52,7 @@ def test_androidworld_stages_and_failure_mapping(bridge, tmp_path, monkeypatch):
     with bridge.lease() as resource:
         result = bridge.evaluate(candidate, resource)
     assert (
-        result.status == "completed" and result.score == 0.6 and calls == ["evaluation"]
+        result.status == "completed" and result.score == 0.6 and calls == ["selection"]
     )
     monkeypatch.setattr(
         runtime, "run_stage", lambda *a, **k: {"status": "invalid_runtime"}

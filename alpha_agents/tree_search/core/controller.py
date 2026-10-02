@@ -132,6 +132,7 @@ class DGMController:
             parent = self.store.candidate(parent_id)
             candidate = materialize(self.bridge.source, self.store.root, id, parent)
             with self.bridge.lease() as resource:
+                logger.info("Candidate=%s parent=%s phase=mutation", id, parent_id)
                 context = self.bridge.prepare(candidate, parent, resource)
                 write_json(candidate.mutation_context, asdict(context))
                 try:
@@ -142,6 +143,12 @@ class DGMController:
                         "error": f"{type(error).__name__}: {error}",
                     }
                 has_patch = recover_patch(candidate)
+                logger.info(
+                    "Candidate=%s mutation=%s has_patch=%s",
+                    id,
+                    mutation["status"],
+                    has_patch,
+                )
                 protected = self._protected_changes(candidate, context.protected_paths)
                 if protected:
                     evaluation = Evaluation(
@@ -169,6 +176,7 @@ class DGMController:
                             )
                         validation.append(asdict(report))
                     write_json(candidate.directory / "validation.json", validation)
+                    logger.info("Candidate=%s phase=evaluation", id)
                     evaluation = self.bridge.evaluate(candidate, resource)
                     if mutation["status"] != "completed" or any(
                         report["status"] == "failed" for report in validation
@@ -182,6 +190,7 @@ class DGMController:
                         else "evaluation_failed"
                     )
         except Exception as error:
+            logger.exception("Candidate=%s failed", id)
             evaluation = Evaluation(
                 "failed", error=f"{type(error).__name__}: {error}", diagnostic=has_patch
             )
@@ -369,19 +378,31 @@ class DGMController:
         self._checkpoint()
         self._bootstrap()
 
-    def run(self, *, resume: bool = False) -> dict:
+    def run(
+        self, *, resume: bool = False, stop_after_children: int | None = None
+    ) -> dict:
+        if stop_after_children is not None and stop_after_children < 1:
+            raise ValueError("stop_after_children must be positive")
         with self.store.lock():
-            return self._run(resume)
+            return self._run(resume, stop_after_children)
 
-    def _run(self, resume: bool) -> dict:
+    def _run(self, resume: bool, stop_after_children: int | None = None) -> dict:
         self._initialize(resume)
+        self.state.pop("stop_reason", None)
+        self._checkpoint()
+        invocation_limit = self.config.max_children
+        if stop_after_children is not None:
+            invocation_limit = min(
+                invocation_limit,
+                self.state["completed_children"] + stop_after_children,
+            )
         with ThreadPoolExecutor(max_workers=self.config.workers) as executor:
             futures = {}
             while (
-                self.state["completed_children"] < self.config.max_children or futures
+                self.state["completed_children"] < invocation_limit or futures
             ):
                 remaining = (
-                    self.config.max_children
+                    invocation_limit
                     - self.state["completed_children"]
                     - len(futures)
                 )
@@ -414,4 +435,16 @@ class DGMController:
                     ]
                     self.state["completed_children"] += 1
                     self._checkpoint()
+        self.state["stop_reason"] = (
+            "invocation_limit"
+            if self.state["completed_children"] < self.config.max_children
+            else "budget_complete"
+        )
+        self._checkpoint()
+        logger.info(
+            "Search stopped reason=%s children=%s budget=%s; resume with --resume",
+            self.state["stop_reason"],
+            self.state["completed_children"],
+            self.config.max_children,
+        )
         return self.state

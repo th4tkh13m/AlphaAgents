@@ -5,9 +5,11 @@ from __future__ import annotations
 import queue
 import sys
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 
 from ...core.contracts import Candidate, Evaluation, MutationContext
+from .task_sets import STAGES, load_sets, stage_tasks
 
 
 class AndroidWorldBridge:
@@ -18,7 +20,7 @@ class AndroidWorldBridge:
             "seed": 42,
             "task_file": str(Path(__file__).with_name("tasks.json")),
             "evaluation_runner": "mobile_agent_http",
-            "score_stage": "evaluation",
+            "score_stage": "selection",
             "max_steps": 50,
             "task_timeout": 3600,
             "stage_timeout": 3600,
@@ -31,7 +33,7 @@ class AndroidWorldBridge:
             raise RuntimeError("AndroidWorld bridge requires Linux/WSL")
         required = ["base_url", "model"]
         if self.config["evaluation_runner"] == "artemis_local":
-            required += ["androidworld_root", "adb_path", "console_port", "grpc_port"]
+            required += ["androidworld_root", "adb_path"]
         else:
             required += ["androidworld_api_url"]
         for key in required:
@@ -40,8 +42,15 @@ class AndroidWorldBridge:
         self.config["task_file"] = str(Path(self.config["task_file"]).resolve())
         if not self.source.is_dir() or not Path(self.config["task_file"]).is_file():
             raise ValueError("AndroidWorld source and task file must exist")
-        if self.config["score_stage"] not in {"screen", "selection", "evaluation"}:
+        if "score_stage" not in config and "selection" not in load_sets(
+            self.config["task_file"]
+        ):
+            self.config["score_stage"] = "evaluation"
+        if self.config["score_stage"] not in STAGES:
             raise ValueError("Unknown AndroidWorld score stage")
+        stage_tasks(self.config["task_file"], self.config["score_stage"])
+        if self.config["score_stage"] == "confirmation" and "seed" not in config:
+            raise ValueError("Confirmation requires an explicit fresh evaluation seed")
         devices = self.config["androidworld_devices"]
         if isinstance(devices, str):
             devices = [value.strip() for value in devices.split(",") if value.strip()]
@@ -49,10 +58,11 @@ class AndroidWorldBridge:
             raise ValueError("Device IDs must be unique")
         self.config["androidworld_devices"] = devices
         if self.config["evaluation_runner"] == "artemis_local":
-            if len(devices) != 1:
-                raise ValueError(
-                    "Artemis local runner requires exactly one assigned ADB device"
-                )
+            from .devices import local_device_ports
+
+            self.config["androidworld_device_ports"] = local_device_ports(
+                devices, self.config
+            )
             for key in ("androidworld_root", "adb_path"):
                 self.config[key] = str(Path(self.config[key]).resolve())
             from .artemis import preserve_source
@@ -63,16 +73,24 @@ class AndroidWorldBridge:
             self.pool.put(device)
 
     def identity(self):
-        return {"type": "androidworld", "config": self.config}
+        return {
+            "type": "androidworld",
+            "config": self.config,
+            "task_sets": load_sets(self.config["task_file"]),
+        }
 
     @contextmanager
     def lease(self):
         device = self.pool.get()
-        config = dict(self.config)
+        config = deepcopy(self.config)
         if device:
             config.update(
                 androidworld_assigned_device=device, androidworld_devices=[device]
             )
+            if config["evaluation_runner"] == "artemis_local":
+                ports = config["androidworld_device_ports"][device]
+                config.update(ports)
+                config["androidworld_device_ports"] = {device: ports}
         try:
             yield config
         finally:
@@ -81,6 +99,8 @@ class AndroidWorldBridge:
     def prepare(self, candidate: Candidate, parent: Candidate | None, resource):
         from . import runtime
 
+        if parent is not None and resource["score_stage"] == "confirmation":
+            raise ValueError("Confirmation is held out; use Selection for DGM mutation")
         runtime.expose_agent_venv(
             candidate.workspace, resource.get("venv_source", str(self.source / ".venv"))
         )

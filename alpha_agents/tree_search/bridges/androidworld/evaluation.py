@@ -185,7 +185,9 @@ def run_queue(worktree, artifact_dir, stage, config, lock_root):
 
 
 def _run_queue(worktree, artifact_dir, stage, config, lock_root, mobile):
-    tasks = list(load_json(config["task_file"])[stage])
+    from .task_sets import stage_tasks
+
+    tasks = stage_tasks(config["task_file"], stage)
     devices = list(config.get("androidworld_devices") or [None])
     interval = max(0.01, float(config.get("evaluation_recovery_interval", 15)))
     max_attempts = max(1, int(config.get("evaluation_task_attempts", 3)))

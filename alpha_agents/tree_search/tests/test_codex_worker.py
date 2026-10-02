@@ -54,7 +54,7 @@ def test_goal_context_keeps_full_evidence_out_of_the_persisted_goal(tmp_path):
     assert GOAL_CONTEXT_FILENAME in (git_dir / "info" / "exclude").read_text()
 
 
-def test_run_codex_uses_workspace_write_and_records_response(monkeypatch, tmp_path):
+def test_run_codex_uses_authorized_full_access_and_records_response(monkeypatch, tmp_path):
     calls = {}
 
     class FakeResult:
@@ -80,7 +80,8 @@ def test_run_codex_uses_workspace_write_and_records_response(monkeypatch, tmp_pa
 
     fake_sdk = types.SimpleNamespace(
         Codex=FakeCodex,
-        Sandbox=types.SimpleNamespace(workspace_write="workspace_write"),
+        Sandbox=types.SimpleNamespace(full_access="full_access"),
+        ApprovalMode=types.SimpleNamespace(deny_all="deny_all"),
     )
     monkeypatch.setitem(sys.modules, "openai_codex", fake_sdk)
     monkeypatch.setenv("DGM_CODEX_EFFORT", "high")
@@ -102,7 +103,8 @@ def test_run_codex_uses_workspace_write_and_records_response(monkeypatch, tmp_pa
         "cwd": str(tmp_path),
         "model": "test-codex",
         "config": {"model_reasoning_effort": "high"},
-        "sandbox": "workspace_write",
+        "sandbox": "full_access",
+        "approval_mode": "deny_all",
         "ephemeral": False,
     }
     assert calls["run"][1] == {"cwd": str(tmp_path), "effort": "high"}
@@ -110,6 +112,8 @@ def test_run_codex_uses_workspace_write_and_records_response(monkeypatch, tmp_pa
     assert "Implemented the retry policy." in history.read_text()
     assert json.loads(telemetry.read_text())["thread_id"] == "thr_test"
     assert json.loads(telemetry.read_text())["effort"] == "high"
+    assert json.loads(telemetry.read_text())["approval_policy"] == "never"
+    assert json.loads(telemetry.read_text())["sandbox"] == "full_access"
     assert json.loads(telemetry.read_text())["execution_mode"] == "turn_compatibility"
     assert (tmp_path / GOAL_CONTEXT_FILENAME).exists()
 

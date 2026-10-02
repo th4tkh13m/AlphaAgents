@@ -8,4 +8,5 @@ build/
 dist/
 output_dgm/
 runs/
+runs/experiments/
 .ruff_cache/

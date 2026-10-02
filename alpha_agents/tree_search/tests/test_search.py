@@ -52,6 +52,38 @@ def test_partial_mutation_is_evaluated(source, tmp_path):
     assert child["id"] in state["diagnostic"]
 
 
+@pytest.mark.parametrize("scheduling", ["synchronous", "asynchronous"])
+def test_stop_after_one_evaluated_child_then_resume_same_archive(
+    source, tmp_path, scheduling
+):
+    output = tmp_path / "run"
+    config = SearchConfig(
+        max_children=4, workers=4, batch_size=4, scheduling=scheduling
+    )
+    bridge = Harness(source)
+    state = DGMController(bridge, Increment(), output, config).run(
+        stop_after_children=1
+    )
+    assert state["completed_children"] == 1
+    assert state["budget"] == 4
+    assert state["stop_reason"] == "invocation_limit"
+    assert not state["pending"] and bridge.leases == 0
+    assert state["records"]["child_000001"]["evaluation"]["status"] == "completed"
+    first_child = read_json(output / "child_000001/candidate.json")
+    baseline = read_json(output / "initial/candidate.json")
+    state = DGMController(bridge, Increment(), output, config).run(
+        resume=True, stop_after_children=1
+    )
+    assert state["completed_children"] == 2
+    assert state["records"]["initial"] == baseline
+    assert state["records"]["child_000001"] == first_child
+    assert not state["pending"] and bridge.leases == 0
+    state = DGMController(bridge, Increment(), output, config).run(resume=True)
+    assert state["completed_children"] == 4
+    assert state["stop_reason"] == "budget_complete"
+    assert not state["pending"] and bridge.leases == 0
+
+
 def test_no_patch_does_not_get_scored(source, tmp_path):
     state = DGMController(
         Harness(source),

@@ -270,7 +270,7 @@ def run_codex(
     model: str,
     telemetry_file: str | None = None,
 ) -> str:
-    """Run Codex with workspace-write access and return its final response."""
+    """Run the user-authorized mutator without sandbox or approval interruptions."""
     history_path = Path(chat_history_file)
     history_path.parent.mkdir(parents=True, exist_ok=True)
     instruction = build_instruction(
@@ -281,7 +281,7 @@ def run_codex(
     )
 
     try:
-        from openai_codex import Codex, Sandbox
+        from openai_codex import ApprovalMode, Codex, Sandbox
     except ImportError as exc:
         raise RuntimeError(
             "Codex SDK is unavailable. Install the repository requirements so "
@@ -304,7 +304,8 @@ def run_codex(
                     cwd=git_dir,
                     model=model,
                     config={"model_reasoning_effort": effort},
-                    sandbox=Sandbox.workspace_write,
+                    sandbox=Sandbox.full_access,
+                    approval_mode=ApprovalMode.deny_all,
                     ephemeral=False,
                 )
                 thread_id = thread.id
@@ -318,7 +319,8 @@ def run_codex(
                     cwd=git_dir,
                     model=model,
                     config={"model_reasoning_effort": effort},
-                    sandbox=Sandbox.workspace_write,
+                    sandbox=Sandbox.full_access,
+                    approval_mode=ApprovalMode.deny_all,
                 )
                 if thread.id != thread_id:
                     raise RuntimeError("Codex resumed a different thread")
@@ -394,7 +396,8 @@ def run_codex(
         "goal_tokens_used": getattr(goal_after, "tokens_used", None),
         "goal_objective": goal_objective,
         "goal_context_file": str(context_path),
-        "sandbox": "workspace_write",
+        "sandbox": "full_access",
+        "approval_policy": "never",
         "turn_status": _jsonable(getattr(result, "status", None)),
         "duration_ms": getattr(result, "duration_ms", None),
         "usage": _jsonable(getattr(result, "usage", None)),

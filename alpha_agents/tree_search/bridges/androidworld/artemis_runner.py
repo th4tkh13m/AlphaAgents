@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ARTEMIS_ROOT))
 sys.path.insert(0, str(ANDROID_WORLD_ROOT))
 
+from answer_handoff import AgentAnswer, submit_answer
 from task_outcomes import bounded_agent_failure
 
 
@@ -97,8 +98,11 @@ def parse_args() -> argparse.Namespace:
 async def main_async(args: argparse.Namespace) -> int:
     from adbutils import AdbClient
     from android_world import checkpointer, registry
-    from android_world.env import env_launcher
-    from artemis import Agent, Builders
+    from android_world.env import adb_utils, env_launcher
+    from android_world.task_evals.information_retrieval.information_retrieval import (
+        InformationRetrieval,
+    )
+    from artemis import Agent, Builders, ConcurrencyMode
     from artemis.config import load_agent_config, load_llm_config_override
     from artemis.context import DevicePlatform
     from artemis.sdk.types.task import AgentProfile
@@ -112,6 +116,19 @@ async def main_async(args: argparse.Namespace) -> int:
 
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if os.getenv("DGM_ARTEMIS_OPENAI_MEMORY_COMPAT", "1") == "1":
+        from memory_compat import configure_openai_memory
+
+        runtime_config = configure_openai_memory(
+            memory_config.model_dump(mode="json"), output
+        )
+        os.environ["ARTEMIS_ARTEMIS_JSONC"] = str(runtime_config)
+        memory_config = load_agent_config(runtime_config)
+        print(
+            "OpenAI memory compatibility: Google-only visual summarization and "
+            "chunk compression disabled; transcript configuration retained",
+            flush=True,
+        )
     traces = output / "traces"
     traces.mkdir(exist_ok=True)
 
@@ -126,16 +143,10 @@ async def main_async(args: argparse.Namespace) -> int:
 
     model_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8001/v1")
     os.environ["OPENAI_BASE_URL"] = model_url
-    import httpx
+    from model_health import wait_for_model
 
-    model_response = httpx.get(f"{model_url.rstrip('/')}/models", timeout=10)
-    model_response.raise_for_status()
-    models = [item["id"] for item in model_response.json().get("data", [])]
     model_name = os.getenv("ARTEMIS_MODEL", "Qwen/Qwen3.8-27B-FP8")
-    if model_name not in models:
-        raise SystemExit(
-            f"Requested model {model_name!r} is not advertised by {model_url}: {models}"
-        )
+    wait_for_model(model_url, model_name)
 
     task_registry = registry.TaskRegistry().get_registry(
         registry.TaskRegistry.ANDROID_WORLD_FAMILY
@@ -192,6 +203,7 @@ async def main_async(args: argparse.Namespace) -> int:
         "seed": args.seed,
         "combinations": args.combinations,
         "adb_serial": args.serial,
+        "perform_emulator_setup": args.perform_emulator_setup,
         "androidworld_version": "checkout",
         "configured_llm_stream_timeout_seconds": args.llm_hard_timeout_seconds,
         "llm_stream_chunk_timeout_seconds": os.getenv(
@@ -206,6 +218,10 @@ async def main_async(args: argparse.Namespace) -> int:
         not in {"false", "0", "no", "off"},
         "artemis_config_override": os.getenv("ARTEMIS_ARTEMIS_JSONC"),
         "memory_settings": {
+            "openai_compatibility_enabled": os.getenv(
+                "DGM_ARTEMIS_OPENAI_MEMORY_COMPAT", "1"
+            )
+            == "1",
             "step_summarizer_enabled": memory_config.flash.step_summarizer.enabled,
             "transcript_enabled": memory_config.memory.transcript.enabled,
             "image_scrub_depth": memory_config.memory.transcript.image_scrub_depth,
@@ -246,6 +262,43 @@ async def main_async(args: argparse.Namespace) -> int:
         suite[name] = instances
     suite = dict(sorted(suite.items()))
 
+    from device_preflight import check_task_apps
+
+    # Information-retrieval templates populate app_names on their instances.
+    selected_instances = {
+        f"{name}[{index}]": task
+        for name, instances in suite.items()
+        for index, task in enumerate(instances)
+    }
+    metadata["device_preflight"] = check_task_apps(
+        selected_instances,
+        list(selected_instances),
+        adb.device(args.serial),
+        adb_utils.get_adb_activity,
+        adb_utils.extract_package_name,
+    )
+    manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
+    print("Device preflight ready: all selected task apps are installed", flush=True)
+
+    if os.getenv("DGM_ANDROIDWORLD_FIXTURE_PREFLIGHT", "1") == "1":
+        from fixture_preflight import check_task_fixtures
+
+        def record_fixture(record):
+            metadata.setdefault("fixture_preflight_progress", []).append(record)
+            manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
+            print(f"Fixture preflight: {record['task']} {record['status']}", flush=True)
+
+        metadata["fixture_preflight"] = check_task_fixtures(
+            selected_instances, env, record_fixture
+        )
+        if metadata["fixture_preflight"]["status"] != "ready":
+            metadata["status"] = "failed"
+            metadata["infrastructure_error"] = "Benchmark fixture initialization failed"
+            manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
+            env.close()
+            raise RuntimeError(metadata["infrastructure_error"])
+        manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
+
     profile = AgentProfile(
         name="androidworld-qwen",
         llm_config=load_llm_config_override(Path(os.environ["DGM_ARTEMIS_LLM_CONFIG"])),
@@ -265,8 +318,22 @@ async def main_async(args: argparse.Namespace) -> int:
             for index, task in enumerate(instances):
                 if (task_name, index) in prior_keys:
                     continue
+                # A service outage between episodes is infrastructure failure,
+                # not evidence that the next benchmark task is difficult.
+                try:
+                    wait_for_model(model_url, model_name)
+                except RuntimeError as exc:
+                    metadata["status"] = "failed"
+                    metadata["infrastructure_error"] = str(exc)
+                    raise
                 started = time.time()
-                agent = Agent(config=config)
+                print(
+                    f"Task started: {task_name}[{index}] device={args.serial}",
+                    flush=True,
+                )
+                agent = Agent(
+                    config=config, concurrency_mode=ConcurrencyMode.PER_DEVICE
+                )
                 task_record = {
                     "template": task_name,
                     "index": index,
@@ -279,6 +346,9 @@ async def main_async(args: argparse.Namespace) -> int:
                     task.initialize_task(env)
                     env.reset(go_home=task.start_on_home_screen)
                     request = agent.new_task(task.goal)
+                    requires_answer = isinstance(task, InformationRetrieval)
+                    if requires_answer:
+                        request.with_output_format(AgentAnswer)
                     request.using_profile("androidworld-qwen")
                     request.with_name(f"androidworld-{task_name}-{index}")
                     # Artemis counts internal graph nodes as well as UI actions.
@@ -287,13 +357,16 @@ async def main_async(args: argparse.Namespace) -> int:
                     )
                     request.with_trace_recording(enabled=True, path=str(traces))
                     failure_phase = "agent_execution"
-                    await asyncio.wait_for(
+                    agent_output = await asyncio.wait_for(
                         agent.run_task(request=request.build()),
                         timeout=args.task_timeout_seconds,
                     )
                     failure_phase = "answer_submission"
                     artemis_run = agent._tasks[-1]
                     artemis_completed = artemis_run.status == "completed"
+                    if requires_answer and artemis_completed:
+                        task_record["agent_answer"] = submit_answer(env, agent_output)
+                        task_record["answer_submitted"] = True
                     failure_phase = "grading"
                     androidworld_reward = float(task.is_successful(env))
                     score = androidworld_reward if artemis_completed else 0.0

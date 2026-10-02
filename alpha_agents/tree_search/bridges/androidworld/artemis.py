@@ -15,6 +15,7 @@ from pathlib import Path
 from ...infrastructure.process import execute
 from .evaluation import atomic_json
 from .runtime import evaluation_lock, read_json
+from .task_sets import stage_tasks
 from .task_outcomes import is_bounded_agent_failure
 
 ROLES = (
@@ -31,6 +32,9 @@ ROLES = (
     "history_analyzer_expert",
     "diagnoser_expert",
     "explorer",
+    "history_analyzer",
+    "planner_validation",
+    "output_analyzer",
 )
 UTILS = ("outputter", "hopper", "video_analyzer", "object_detector")
 
@@ -110,7 +114,7 @@ def json_safe(value):
 
 
 def runner_command(worktree, output, tasks, config):
-    return [
+    command = [
         config["python"],
         str(Path(__file__).with_name("artemis_runner.py")),
         "--tasks",
@@ -132,6 +136,9 @@ def runner_command(worktree, output, tasks, config):
         "--llm-hard-timeout-seconds",
         str(config.get("llm_timeout", 180)),
     ]
+    if config.get("perform_emulator_setup", False):
+        command.append("--perform-emulator-setup")
+    return command
 
 
 def execution_environment(worktree, output, config):
@@ -151,6 +158,12 @@ def execution_environment(worktree, output, config):
         DGM_ARTEMIS_WORKTREE=str(Path(worktree).resolve()),
         DGM_ANDROIDWORLD_ROOT=config["androidworld_root"],
         DGM_ARTEMIS_LLM_CONFIG=str(llm_path),
+        DGM_ARTEMIS_OPENAI_MEMORY_COMPAT="1"
+        if config.get("openai_memory_compatibility", True)
+        else "0",
+        DGM_ANDROIDWORLD_FIXTURE_PREFLIGHT="1"
+        if config.get("fixture_preflight", True)
+        else "0",
         ARTEMIS_TRACES_DIR=str(output / "runtime"),
         ARTEMIS_MODEL=config["model"],
         OPENAI_BASE_URL=config["base_url"],
@@ -233,7 +246,7 @@ def normalize_manifest(manifest, tasks, config, process):
 def run_stage(worktree, output, stage, config, lock_root):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    tasks = read_json(config["task_file"])[stage]
+    tasks = stage_tasks(config["task_file"], stage)
     if (
         not tasks
         or len(tasks) != len(set(tasks))
@@ -268,7 +281,7 @@ def run_stage(worktree, output, stage, config, lock_root):
 def mutation_context(candidate, parent, resource):
     from ...core.contracts import MutationContext
 
-    tasks = read_json(resource["task_file"])[resource["score_stage"]]
+    tasks = stage_tasks(resource["task_file"], resource["score_stage"])
     output = candidate.directory / "mutation_experiment"
     command = runner_command(candidate.workspace, output, tasks[:1], resource)
     env = execution_environment(candidate.workspace, output, resource)
@@ -276,6 +289,8 @@ def mutation_context(candidate, parent, resource):
         "DGM_ARTEMIS_WORKTREE",
         "DGM_ANDROIDWORLD_ROOT",
         "DGM_ARTEMIS_LLM_CONFIG",
+        "DGM_ARTEMIS_OPENAI_MEMORY_COMPAT",
+        "DGM_ANDROIDWORLD_FIXTURE_PREFLIGHT",
         "ARTEMIS_TRACES_DIR",
         "ARTEMIS_MODEL",
         "OPENAI_BASE_URL",
@@ -286,7 +301,7 @@ def mutation_context(candidate, parent, resource):
     experiment += " OPENAI_API_KEY=EMPTY " + shlex.join(command)
     parent_record = read_json(parent.directory / "candidate.json") if parent else None
     return MutationContext(
-        "Improve Artemis general reliability using the parent evaluation evidence.",
+        "Improve this mobile agent harness performance and reliability using the parent evaluation evidence.",
         "Edit only this disposable candidate workspace. Original harness directories, "
         "the trusted evaluator, benchmark tasks, rewards, and parent evidence are immutable. "
         "Do not add task-specific rules or fixed coordinates.\n"
@@ -295,11 +310,28 @@ def mutation_context(candidate, parent, resource):
         "in .dgm_preserved_modules/mapping.json; do not replace the ignored symlink.\n"
         "Use ./venv/bin/python for candidate tests. The assigned ADB device is "
         f"{resource['androidworld_assigned_device']} (console {resource['console_port']}, "
-        f"gRPC {resource['grpc_port']}). No HTTP AndroidWorld service is required.\n"
+        f"gRPC {resource['grpc_port']}).\n"
         "Inspect .dgm_parent_evidence/candidate.json and .dgm_parent_evidence/stages/ "
         "for task outcomes, exceptions, stdout/stderr, traces, and manifests. "
         "A process exit of zero does not establish benchmark success.\n"
-        "Representative run command, using this candidate and the trusted bridge evaluator:\n"
+        "Check any benchmark_diagnostics in the supplied evidence before choosing "
+        "a repair. A goal/validator mismatch is a scoring issue, not permission to "
+        "change the benchmark or add a task-specific compensation. Distinguish "
+        "such mismatches from actual agent errors and runtime exceptions.\n"
+        "Each stage retains runtime/data_engine.db with sessions, ordered steps, "
+        "actions, execution results, model/tool traces, OCR, and UI trees. Read it "
+        "with SQLite mode=ro. Match sessions.initial_goal to the chosen task goal; "
+        "resolve steps.pre_image_name and post_image_name to runtime/images/<name>.jpg "
+        "and view the relevant screenshots before diagnosing a UI failure. "
+        "Finalized exports live in traces/; partial SQLite trajectories, screenshots, "
+        "recordings, and notes can remain in runtime/ even if finalization fails.\n"
+        "Inspect the experiment manifest's memory_settings for the effective runtime "
+        "configuration. OpenAI memory compatibility disables the preserved harness's "
+        "Google-only visual summarizer and capsule compression through public flags "
+        "while retaining transcript history.\n"
+        "Representative run command, using this candidate and the trusted bridge evaluator. "
+        "This example defaults to the first scoring task; replace its --tasks argument "
+        "with exactly the one task chosen under the mutator's easiest-first policy:\n"
         + experiment
         + "\n"
         f"Read {output}/manifest.json and {output}/runner/ if present; this direct command "
@@ -316,6 +348,7 @@ def mutation_context(candidate, parent, resource):
             "experiment_command": command,
             "experiment_environment": {key: env[key] for key in keys},
             "evaluation_tasks": tasks,
+            "benchmark_diagnostics": resource.get("benchmark_diagnostics", []),
         },
         tuple(resource.get("protected_paths", [])),
     )
