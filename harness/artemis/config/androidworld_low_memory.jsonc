@@ -1,0 +1,23 @@
+{
+  "agent": {
+    "flash": {
+      "step_summarizer": {
+        "enabled": false
+      }
+    },
+    "memory": {
+      "transcript": {
+        "enabled": true,
+        "image_scrub_depth": 1,
+        "image_scrub_depth_relaxed": 1,
+        "pending_grace_steps": 0
+      },
+      "chunking": {
+        "enabled": false,
+        "max_steps": 10000,
+        "min_steps": 3,
+        "target_source_tokens": 1000000
+      }
+    }
+  }
+}
