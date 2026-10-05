@@ -98,7 +98,7 @@ The CLI writes `search.log` in the output directory and also logs to stderr. Log
 
 ## AndroidWorld adapter
 
-The mobile HTTP evaluator retains per-task checkpoints, device health/reset probes, episode reclamation, and evaluator crash recovery. A lease spans mutation and evaluation and is returned afterward. The bridge uses the new disjoint sets: 5 Screen, 20 Selection, and 91 held-out Confirmation templates. The default scoring split is `selection`; `evaluation` remains a compatibility alias for that split with the new manifest. `confirmation` requires an explicit fresh seed and cannot be used for mutation. Different subsets are never mixed within one run, and changing the task partition invalidates the resume contract. The controller continues to compare candidates on one configured split; automatic stage gates are not introduced.
+The mobile HTTP evaluator retains per-task checkpoints, device health/reset probes, episode reclamation, and evaluator crash recovery. A lease spans mutation and evaluation and is returned afterward. The bridge uses the new disjoint sets: 5 Screen, 20 Selection, and 91 held-out Confirmation templates. The default scoring split is `selection`; `evaluation` remains a compatibility alias for that split with the new manifest. `confirmation` requires an explicit fresh seed and cannot be used for mutation. Different subsets are never mixed in candidate ranking, and changing the task partition invalidates the resume contract. Local Artemis optionally performs cached full-benchmark audits of the root and final Selection winner, with Confirmation evidence stored outside parent directories. See the bridge README for full audits and parallel evaluation settings.
 
 ## Verification
 

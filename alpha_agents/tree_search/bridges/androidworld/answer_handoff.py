@@ -2,6 +2,11 @@
 
 from pydantic import BaseModel, Field
 
+if __package__:
+    from .task_outcomes import MissingAgentAnswerError
+else:
+    from task_outcomes import MissingAgentAnswerError
+
 
 class AgentAnswer(BaseModel):
     answer: str = Field(
@@ -19,7 +24,7 @@ def submit_answer(env, output) -> str:
 
     answer = getattr(output, "answer", None)
     if not isinstance(answer, str) or not answer.strip():
-        raise ValueError(
+        raise MissingAgentAnswerError(
             "Artemis did not return a non-empty information-retrieval answer"
         )
     env.execute_action(

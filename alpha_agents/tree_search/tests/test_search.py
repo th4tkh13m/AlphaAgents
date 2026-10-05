@@ -52,6 +52,40 @@ def test_partial_mutation_is_evaluated(source, tmp_path):
     assert child["id"] in state["diagnostic"]
 
 
+def test_required_baseline_failure_stops_before_mutation(source, tmp_path):
+    from alpha_agents.tree_search.core.contracts import RequiredEvaluationError
+
+    class RequiredHarness(Harness):
+        def evaluate(self, candidate, resource):
+            raise RequiredEvaluationError("full audit evaluator failed")
+
+    output = tmp_path / "run"
+    with pytest.raises(RequiredEvaluationError):
+        DGMController(RequiredHarness(source), Increment(), output, SearchConfig(max_children=2)).run()
+    assert not list(output.glob("child_*"))
+    assert not read_json(output / "state.json")["initialized"]
+
+
+def test_final_audit_waits_for_full_child_budget_and_selects_archive(source, tmp_path):
+    class AuditedHarness(Harness):
+        audits = 0
+
+        def finalize(self, root, records, archive):
+            self.audits += 1
+            winner = max(archive, key=lambda id: records[id]["evaluation"]["score"])
+            return {"status": "completed", "candidate": winner}
+
+    bridge = AuditedHarness(source)
+    output = tmp_path / "run"
+    config = SearchConfig(max_children=2, workers=1, batch_size=1)
+    first = DGMController(bridge, Increment(), output, config).run(stop_after_children=1)
+    assert bridge.audits == 0 and "final_evaluation" not in first
+    final = DGMController(bridge, Increment(), output, config).run(resume=True)
+    assert bridge.audits == 1
+    assert final["final_evaluation"]["candidate"] in final["archive"]
+    assert final["stop_reason"] == "budget_complete"
+
+
 @pytest.mark.parametrize("scheduling", ["synchronous", "asynchronous"])
 def test_stop_after_one_evaluated_child_then_resume_same_archive(
     source, tmp_path, scheduling

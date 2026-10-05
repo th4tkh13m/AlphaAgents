@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
         "--llm-hard-timeout-seconds",
         type=int,
         default=int(os.environ.get("ARTEMIS_LLM_HARD_TIMEOUT_SECONDS", "180")),
-        help="Stream chunk timeout; the harness retains its own invocation timeout (default 180)",
+        help="Agent model-call hard timeout and stream chunk timeout in seconds",
     )
     parser.add_argument(
         "--artemis-steps-multiplier",
@@ -106,6 +106,13 @@ async def main_async(args: argparse.Namespace) -> int:
     from artemis.config import load_agent_config, load_llm_config_override
     from artemis.context import DevicePlatform
     from artemis.sdk.types.task import AgentProfile
+    from artemis.services.llm import invoke_llm_with_timeout_message
+    from runtime_limits import configure_llm_timeout
+
+    invocation_timeout = configure_llm_timeout(
+        invoke_llm_with_timeout_message, args.llm_hard_timeout_seconds
+    )
+    print(f"Agent LLM invocation timeout: {invocation_timeout} seconds", flush=True)
 
     if args.artemis_config:
         config_path = args.artemis_config.resolve()
@@ -175,6 +182,7 @@ async def main_async(args: argparse.Namespace) -> int:
             previous.get("combinations"),
             previous.get("tasks"),
             previous.get("androidworld_revision"),
+            previous.get("llm_invocation_timeout_seconds", 180),
         ) != (
             model_name,
             model_url,
@@ -182,9 +190,10 @@ async def main_async(args: argparse.Namespace) -> int:
             args.combinations,
             selected,
             aw_revision,
+            invocation_timeout,
         ):
             raise SystemExit(
-                "Refusing to resume with a changed model, endpoint, task list, seed, combination count, or AndroidWorld revision"
+                "Refusing to resume with a changed model, endpoint, task list, seed, combination count, AndroidWorld revision, or LLM invocation timeout"
             )
         prior_episodes = previous.get("episodes", [])
     prior_keys = {
@@ -206,6 +215,7 @@ async def main_async(args: argparse.Namespace) -> int:
         "perform_emulator_setup": args.perform_emulator_setup,
         "androidworld_version": "checkout",
         "configured_llm_stream_timeout_seconds": args.llm_hard_timeout_seconds,
+        "llm_invocation_timeout_seconds": invocation_timeout,
         "llm_stream_chunk_timeout_seconds": os.getenv(
             "LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S",
             str(args.llm_hard_timeout_seconds),

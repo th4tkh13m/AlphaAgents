@@ -46,3 +46,23 @@ def test_cleanup_failure_prevents_ready_result():
     )
     assert result["status"] == "failed"
     assert "snapshot restoration failed" in result["tasks"][0]["cleanup_error"]
+
+
+def test_constructor_consumed_params_are_preserved_without_reconstruction():
+    class ConsumingFixture(Fixture):
+        def __init__(self, params):
+            super().__init__(params)
+            self.img = params.pop("img")
+
+        def initialize_task(self, env):
+            assert self.img == ["receipt pixels"]
+            self.img.append("temporary preflight change")
+            super().initialize_task(env)
+
+    original = ConsumingFixture({"name": "receipt", "img": ["receipt pixels"]})
+    assert "img" not in original.params
+    events = []
+    result = check_task_fixtures({"receipt": original}, events)
+    assert result["status"] == "ready"
+    assert original.img == ["receipt pixels"] and not original.initialized
+    assert events == [("initialize", "receipt"), ("cleanup", "receipt")]

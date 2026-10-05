@@ -70,10 +70,10 @@ def test_mobile_evaluation_requires_no_mutator_live_evidence(
     monkeypatch.setattr(
         runtime,
         "run_stage",
-        lambda *a, **k: {
+        lambda workspace, artifacts, stage, config, lock_root: {
             "status": "completed",
             "planned_denominator": 2,
-            "success_rate_pct": 50,
+            "success_rate_pct": 100 if stage == "screen" else 50,
         },
     )
     with bridge.lease() as resource:

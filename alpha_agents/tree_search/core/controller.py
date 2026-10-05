@@ -19,6 +19,7 @@ from .contracts import (
     Evaluation,
     HarnessBridge,
     MutationBackend,
+    RequiredEvaluationError,
     ValidationReport,
 )
 from .storage import RunStore, read_json, write_json
@@ -254,6 +255,8 @@ class DGMController:
                 with self.bridge.lease() as resource:
                     self.bridge.prepare(candidate, None, resource)
                     evaluation = self.bridge.evaluate(candidate, resource)
+            except RequiredEvaluationError:
+                raise
             except Exception as error:
                 evaluation = Evaluation(
                     "failed", error=f"{type(error).__name__}: {error}", diagnostic=True
@@ -435,6 +438,12 @@ class DGMController:
                     ]
                     self.state["completed_children"] += 1
                     self._checkpoint()
+        if self.state["completed_children"] >= self.config.max_children:
+            finalize = getattr(self.bridge, "finalize", None)
+            if finalize is not None:
+                self.state["final_evaluation"] = finalize(
+                    self.store.root, self.state["records"], self.state["archive"]
+                )
         self.state["stop_reason"] = (
             "invocation_limit"
             if self.state["completed_children"] < self.config.max_children

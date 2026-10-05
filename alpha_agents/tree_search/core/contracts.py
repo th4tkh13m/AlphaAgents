@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 
+class RequiredEvaluationError(RuntimeError):
+    """A required baseline or final audit failed; search must not continue."""
+
+
 @dataclass(frozen=True)
 class Candidate:
     id: str

@@ -11,7 +11,7 @@ from alpha_agents.tree_search.bridges.androidworld import artemis
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
 from alpha_agents.tree_search.core.contracts import Candidate
 from alpha_agents.tree_search.core.workspace import materialize
-from alpha_agents.tree_search.bridges.androidworld.task_outcomes import bounded_agent_failure
+from alpha_agents.tree_search.bridges.androidworld.task_outcomes import MissingAgentAnswerError, bounded_agent_failure
 
 
 def settings(tmp_path):
@@ -62,10 +62,13 @@ GraphLimit = type("GraphRecursionError", (Exception,), {"__module__": "langgraph
 
 
 @pytest.mark.parametrize(
-    "error",
-    [TimeoutError(), TimeoutError("LLM call timed out after 180 seconds."), GraphLimit("limit 100")],
+    "error,phase",
+    [(TimeoutError(), "agent_execution"),
+     (TimeoutError("LLM call timed out after 180 seconds."), "agent_execution"),
+     (GraphLimit("limit 100"), "agent_execution"),
+     (MissingAgentAnswerError("Artemis did not return a non-empty information-retrieval answer"), "answer_submission")],
 )
-def test_bounded_agent_failure_preserves_other_tasks_and_exception(tmp_path, monkeypatch, error):
+def test_bounded_agent_failure_preserves_other_tasks_and_exception(tmp_path, monkeypatch, error, phase):
     config = settings(tmp_path)
     tasks = ["ClockStopWatchRunning", "SecondTask"]
     Path(config["task_file"]).write_text(json.dumps({"evaluation": tasks}))
@@ -74,7 +77,7 @@ def test_bounded_agent_failure_preserves_other_tasks_and_exception(tmp_path, mon
     failure = {
         "template": tasks[1], "index": 0, "success": 0.0,
         "exception": f"{type(error).__name__}: {error}", "seconds": 180,
-        **bounded_agent_failure(error, "agent_execution"),
+        **bounded_agent_failure(error, phase),
     }
     value["episodes"].append(failure)
     summary = artemis.normalize_manifest(value, tasks, config, PROCESS)
@@ -124,6 +127,16 @@ def test_agent_failure_marker_cannot_hide_invalid_evidence(tmp_path, defect):
 
 def test_unknown_agent_error_is_not_a_bounded_failure():
     assert not bounded_agent_failure(RuntimeError("broken evaluator integration"), "agent_execution")
+
+
+@pytest.mark.parametrize("phase", ["setup", "agent_execution", "grading", "teardown"])
+def test_missing_answer_error_outside_submission_remains_invalid(phase):
+    assert not bounded_agent_failure(MissingAgentAnswerError("missing answer"), phase)
+
+
+def test_unknown_answer_submission_error_is_not_scored():
+    assert not bounded_agent_failure(ValueError("Artemis did not return a non-empty information-retrieval answer"), "answer_submission")
+    assert not bounded_agent_failure(RuntimeError("AndroidWorld did not retain the submitted agent answer"), "answer_submission")
 
 
 def test_runner_can_request_official_emulator_setup(tmp_path):

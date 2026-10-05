@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from .answer_handoff import AgentAnswer, submit_answer
+from .task_outcomes import MissingAgentAnswerError, bounded_agent_failure
 
 
 def test_runner_loads_answer_helper_outside_repository(tmp_path):
@@ -63,11 +64,12 @@ def test_submits_agent_answer_unchanged(answer):
 @pytest.mark.parametrize(
     "output", [None, {}, SimpleNamespace(answer=7), AgentAnswer(answer=""), AgentAnswer(answer="  ")]
 )
-def test_missing_output_is_runtime_failure_before_grading(output):
+def test_missing_output_is_scored_agent_failure_before_grading(output):
     env = Environment()
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(MissingAgentAnswerError, match="non-empty") as raised:
         submit_answer(env, output)
     assert not env.actions
+    assert bounded_agent_failure(raised.value, "answer_submission")["failure_kind"] == "missing_answer"
 
 
 def test_rejected_answer_is_runtime_failure_before_grading():

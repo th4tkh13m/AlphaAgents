@@ -143,6 +143,8 @@ def runner_command(worktree, output, tasks, config):
 
 def execution_environment(worktree, output, config):
     output = Path(output).resolve()
+    temporary = output / "tmp"
+    temporary.mkdir(parents=True, exist_ok=True)
     endpoint = {"provider": "openai", "model": config["model"]}
     role = {
         **endpoint,
@@ -170,6 +172,7 @@ def execution_environment(worktree, output, config):
         OPENAI_API_KEY=env.get("OPENAI_API_KEY", "EMPTY"),
         LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S=str(config.get("llm_timeout", 180)),
         PYTHONDONTWRITEBYTECODE="1",
+        TMPDIR=str(temporary),
     )
     return env
 
@@ -243,10 +246,10 @@ def normalize_manifest(manifest, tasks, config, process):
     }
 
 
-def run_stage(worktree, output, stage, config, lock_root):
+def run_stage(worktree, output, stage, config, lock_root, *, tasks=None):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    tasks = stage_tasks(config["task_file"], stage)
+    tasks = stage_tasks(config["task_file"], stage) if tasks is None else tasks
     if (
         not tasks
         or len(tasks) != len(set(tasks))
@@ -304,6 +307,9 @@ def mutation_context(candidate, parent, resource):
         "Improve this mobile agent harness performance and reliability using the parent evaluation evidence.",
         "Edit only this disposable candidate workspace. Original harness directories, "
         "the trusted evaluator, benchmark tasks, rewards, and parent evidence are immutable. "
+        "Use only supplied Selection evidence. Full-benchmark cache entries, "
+        "Confirmation outcomes, and root/final audit reports are held out; do not "
+        "open them or use them to guide mutations. "
         "Do not add task-specific rules or fixed coordinates.\n"
         "Required modules named output* are exposed through symlinks because the core "
         "excludes output artifacts. If changing one, edit its tracked backing file listed "

@@ -8,7 +8,13 @@ Set `androidworld_api_url`, `base_url`, and `model` explicitly. `androidworld_de
 
 `prepare()` supplies AndroidWorld-specific editing guidance and runtime constraints through `MutationContext.instructions`. Coding-agent templates belong to their mutator packages; this bridge has no replacement mutation prompt. The example uses the default Codex template, which incorporates these supplied instructions.
 
-All candidates in a run use the same `score_stage`, defaulting to `selection`. Use `screen` for the five-task execution set. `confirmation` evaluates held-out tasks with an explicitly supplied fresh `seed`; the bridge refuses to prepare mutations against that set. The old `evaluation` stage name aliases Selection for the new sets, while explicit legacy manifests remain supported. The bridge does not invent gate thresholds or run an automatic staged search; no thresholds are specified in the supplied manifest. Configure independent validators when focused regression tests are desired. Validator failures remain diagnostics and do not prevent benchmark scoring. Transport failures and missing/incomplete task evidence carry no score.
+All candidates in a run use the same `score_stage`, defaulting to `selection`. Children first run the five Screen tasks when the manifest includes that set. All Screen tasks must pass before Selection runs; a failed gate retains Screen diagnostics and has no ranking score. Screen results never contribute to the Selection score. Use `screen` for the five-task execution set. `confirmation` evaluates held-out tasks with an explicitly supplied fresh `seed`; the bridge refuses to prepare mutations against that set. The old `evaluation` stage name aliases Selection for the new sets, while explicit legacy manifests remain supported. Configure independent validators when focused regression tests are desired. Validator failures remain diagnostics and do not prevent benchmark scoring. Transport failures and missing/incomplete task evidence carry no score.
+
+For local Artemis, enable `full_benchmark: true`, set an explicit persistent `benchmark_cache_dir` outside candidate directories, and choose a `confirmation_seed` different from the Selection seed. The root runs all 116 tasks before mutation, and the highest Selection-scoring candidate receives a full audit after the child budget completes. Full results and trajectories remain in the separate cache; only Selection evidence is copied to parent directories. Required audit infrastructure failures stop the controller rather than declaring completion. Full reports include both strict pass rate and mean reward, retaining partial credit.
+
+Completed cache entries are matched by agent files, evaluator and bridge files, installed Python packages, task sets, model/endpoint, seeds, and runtime settings. Supply `model_revision` and `fixture_identity` when model weights or device fixtures change under unchanged names. Reuse rechecks the saved evaluator process and per-task manifests; incomplete or invalid stages are retained separately and rerun. Reports at the search root link to the persistent audit. Confirmation results must never guide mutations.
+
+Set `evaluation_workers: 2` and configure two `androidworld_devices` with distinct console/gRPC port mappings to evaluate disjoint task batches concurrently. Each runner uses separate output and temporary directories; task parameter seeds are stable across sharding. Mutation still uses a single leased device. Evaluations borrow only idle devices without blocking on another lease, so concurrent searches fall back to fewer evaluation workers safely. Child scores still come exclusively from the 20 Selection tasks.
 
 `task_file` accepts the original row-based manifest or a flat stage-to-task mapping. Historical `artemis_success`, runtimes, and seeds are not used as candidate scores or newly frozen parameter settings. Paired Selection instances use the same configured seed for every candidate. Configure Confirmation seeds separately. Audit the answer/evaluator integration for information-retrieval tasks and preflight VLC setup as specified in the manifest notes.
 
@@ -42,9 +48,11 @@ In the AndroidWorld bridge configuration, supply:
 - `task_file`, `score_stage`, `seed`, `task_timeout`, and `stage_timeout`: the fixed evaluation contract.
 
 Use absolute paths in this configuration. `llm_timeout` configures supported
-Artemis role timeouts and the stream chunk timeout; the outer process timeout
-kills the evaluator process group. The original harness decides its remaining
-LLM behavior. Task rewards come from the trusted AndroidWorld checkout.
+Artemis role timeouts, the stream chunk timeout, and the default hard limit in
+its shared model-call invocation helper. The runner configures that helper in
+memory; original harness files remain unchanged, and explicit per-call limits
+remain respected. The outer process timeout kills the evaluator process group.
+Task rewards come from the trusted AndroidWorld checkout.
 
 Each candidate saves `stages/<stage>/evaluation_request.json`, `manifest.json`,
 `summary.json`, `runner/process.json`, stdout/stderr, checkpoints, and Artemis
