@@ -45,6 +45,7 @@ def materialize(
             "venv",
             ".dgm_parent_evidence",
             ".dgm_goal_context.md",
+            ".dgm_archive",
         ),
     )
     git(
@@ -98,11 +99,15 @@ def materialize(
         shutil.copytree(
             parent.directory,
             evidence,
-            ignore=shutil.ignore_patterns("worktree", "gitdir"),
+            ignore=shutil.ignore_patterns(
+                "worktree", "gitdir", ".dgm_archive", "archive_snapshot.json",
+                "mutation_context.json", "self_evo.md", "self_evolution.md",
+                "mutation", "transfer_report.json", "transfer_assessment.json",
+            ),
         )
     exclude = directory / "gitdir" / "info" / "exclude"
     with exclude.open("a", encoding="utf-8") as stream:
-        stream.write("\n.dgm_parent_evidence/\n.dgm_goal_context.md\n")
+        stream.write("\n.dgm_parent_evidence/\n.dgm_goal_context.md\n.dgm_archive/\n")
     base_commit = git(workspace, "rev-parse", "HEAD")
     from .storage import write_json
 

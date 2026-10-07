@@ -176,6 +176,11 @@ class AndroidWorldBridge:
     def evaluate(self, candidate: Candidate, resource):
         from . import runtime
 
+        if candidate.parent_id is None and resource.get("reuse_root_from"):
+            from .archive import reuse_root
+
+            return reuse_root(candidate, resource)
+
         # Every scored candidate uses the same task split. Scores from a small
         # screening subset must not compete with full-suite scores.
         stage = resource["score_stage"]
@@ -276,6 +281,12 @@ class AndroidWorldBridge:
         if not archive:
             raise RequiredEvaluationError("No valid Selection candidate exists for final full benchmark")
         best = max(archive, key=lambda id: records[id]["evaluation"]["score"])
+        if best == "initial" and self.config.get("reuse_root_from"):
+            from ...core.storage import read_json
+
+            report = read_json(root / "root_full_benchmark.json")
+            write_json(root / "final_full_benchmark.json", {**report, "winner": best})
+            return {**report, "winner": best}
         record = records[best]
         candidate = Candidate(best, record["parent_id"], root / best, record["base_commit"])
         from .benchmark import cache_identity, full_benchmark

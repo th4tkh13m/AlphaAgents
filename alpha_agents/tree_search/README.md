@@ -86,6 +86,54 @@ Failures use `{"status": "failed", "error": "runtime unavailable"}`. Logs go to 
 
 ## Search and resume
 
+### Archive-assisted capability transfer
+
+Set `archive_access.enabled` to true to expose settled Selection evidence to
+each coding agent. `import_runs` optionally supplies existing DGM run directories;
+`include_current_run` defaults to true. Only local Artemis/AndroidWorld currently
+implements the benchmark adapter. The coding agent chooses its task and donors;
+existing parent selection and archive admission remain unchanged.
+
+The context provides a trusted local helper for `query --task TASK`,
+`inspect --node REF`, `export --node REF --task TASK`, and `compare --node REF`.
+Exports reconstruct the complete baseline-plus-patch lineage and include
+task-scoped trajectories and screenshots. Frozen catalogs, namespaced identities
+and artifact checks keep each mutation's evidence consistent. Confirmation and
+full-audit outcomes are excluded. These are integrity controls, not an OS sandbox.
+
+The agent writes `transfer_report.json` in its candidate artifact directory.
+Independent evaluation produces `transfer_assessment.json` with the target gain,
+retained parent passes, regressions and evidence gaps. A positive assessment
+requires observed target gain and preservation; it does not change the score or
+search admission. No prescribed target or donor is inserted by the controller.
+
+To reuse an already measured root, set
+`harness.config.reuse_root_from` to the original run directory. Reuse validates
+immutable source, canonical Selection manifests/seeds, agent/evaluator hashes,
+dependency versions and task definitions against the existing audit identity.
+A mismatch fails closed rather than silently rerunning the root. The root's
+Selection evidence is copied; its full report remains outside mutation evidence.
+
+Example optional configuration fragment:
+
+```json
+{
+  "archive_access": {
+    "enabled": true,
+    "import_runs": ["../previous-run"],
+    "include_current_run": true,
+    "allowed_stages": ["selection"]
+  },
+  "transfer_assessment": {
+    "require_partial_reward_preservation": false,
+    "affect_search_admission": false
+  }
+}
+```
+
+Fresh paired verification panels and admission overrides are deliberately
+rejected if configured: they are not silently treated as implemented.
+
 `SearchConfig` controls the total child budget, worker count, batch size, scheduling, parent selection, archive policy, seed, and score tolerance. Synchronous search selects a batch from one parent pool and waits for all children before selecting another. Asynchronous search admits completed children and fills free slots immediately; completion order can affect parent choice.
 
 `best` selects the highest score. `score_prop` uses normalized scores; `score_child_prop` additionally favors parents with fewer recorded children. Diagnostic evaluations remain selectable as repair evidence. Valid candidates below the archive threshold remain in the retained parent pool. `keep_better` admits scores at least baseline minus `score_tolerance`; `keep_all` admits every valid score.

@@ -23,16 +23,24 @@ def resolve_config(config: dict, base: Path) -> dict:
     for key in ("evaluator_cwd",):
         if harness.get(key):
             harness[key] = path(harness[key])
-    for key in ("task_file", "venv_source"):
+    for key in ("task_file", "venv_source", "task_metadata_file"):
         if harness.get("config", {}).get(key):
             harness["config"][key] = path(harness["config"][key])
     mutation = config["mutation"]
+    if config.get("archive_access", {}).get("enabled"):
+        config["archive_access"]["import_runs"] = [
+            path(value) for value in config["archive_access"].get("import_runs", [])
+        ]
+    if harness.get("config", {}).get("reuse_root_from"):
+        harness["config"]["reuse_root_from"] = path(harness["config"]["reuse_root_from"])
     if mutation.get("prompt_template"):
         mutation["prompt_template"] = path(mutation["prompt_template"])
     for validator in config.get("validation", []):
         interpreter = validator.get("python")
         if interpreter and (base / interpreter).is_file():
-            validator["python"] = path(interpreter)
+            # A virtual environment is identified by the invoked executable's
+            # path. Resolving its symlink selects the base Python instead.
+            validator["python"] = str((base / Path(interpreter).expanduser()).absolute())
     for section, key in ((harness, "evaluate_command"), (mutation, "command")):
         if key in section:
             section[key] = [
@@ -97,12 +105,24 @@ def build(config: dict, output: Path):
             )
         else:
             raise ValueError("Unknown validation type")
+    archive_provider = None
+    if config.get("archive_access", {}).get("enabled"):
+        from .archive.catalog import ArchiveProvider
+        from .bridges.androidworld.archive import AndroidWorldArchive
+
+        if harness["type"] != "androidworld" or bridge.config["evaluation_runner"] != "artemis_local":
+            raise ValueError("Archive access currently requires local Artemis/AndroidWorld")
+        archive_provider = ArchiveProvider(
+            config["archive_access"], AndroidWorldArchive(bridge.config),
+            config.get("transfer_assessment", {}),
+        )
     return DGMController(
         bridge,
         mutator,
         output,
         SearchConfig(**config.get("search", {})),
         tuple(validators),
+        archive_provider=archive_provider,
     )
 
 

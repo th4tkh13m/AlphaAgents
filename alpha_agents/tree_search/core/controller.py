@@ -61,9 +61,11 @@ class DGMController:
         output: Path,
         config: SearchConfig,
         validators: tuple[CandidateValidator, ...] = (),
+        archive_provider=None,
     ):
         self.bridge, self.mutator, self.config = bridge, mutator, config
         self.validators = tuple(validators)
+        self.archive_provider = archive_provider
         if output.resolve().is_relative_to(bridge.source.resolve()):
             raise ValueError(
                 "Search output must be outside the editable harness source"
@@ -123,7 +125,7 @@ class DGMController:
             weights = [weight / (1 + counts[id]) for id, weight in zip(ids, weights)]
         return self.rng.choices(ids, weights=weights, k=1)[0]
 
-    def _child(self, id: str, parent_id: str):
+    def _child(self, id: str, parent_id: str, archive_snapshot=None):
         directory = self.store.root / id
         candidate = Candidate(id, parent_id, directory, "")
         mutation = None
@@ -135,6 +137,8 @@ class DGMController:
             with self.bridge.lease() as resource:
                 logger.info("Candidate=%s parent=%s phase=mutation", id, parent_id)
                 context = self.bridge.prepare(candidate, parent, resource)
+                if self.archive_provider is not None:
+                    context = self.archive_provider.augment(candidate, context, archive_snapshot)
                 write_json(candidate.mutation_context, asdict(context))
                 try:
                     mutation = asdict(self.mutator.mutate(candidate, context))
@@ -196,9 +200,12 @@ class DGMController:
                 "failed", error=f"{type(error).__name__}: {error}", diagnostic=has_patch
             )
             status = "evaluation_failed" if has_patch else "mutation_failed"
-        return self.store.save_candidate(
+        record = self.store.save_candidate(
             candidate, evaluation, status, mutation, validation
         )
+        if self.archive_provider is not None:
+            self.archive_provider.assess(candidate, parent_id, record)
+        return record
 
     def _protected_changes(self, candidate: Candidate, patterns):
         changed = git(
@@ -316,6 +323,8 @@ class DGMController:
             "search": asdict(self.config),
             "validators": [validator.identity() for validator in self.validators],
         }
+        if self.archive_provider is not None:
+            contract["archive_access"] = self.archive_provider.identity()
         contract = json.loads(json.dumps(contract))
         # Only the total budget may increase on resume. All other settings,
         # source snapshots, and evaluator identities must match.
@@ -416,9 +425,17 @@ class DGMController:
                 for _ in range(max(0, slots)):
                     id = f"child_{self.state['completed_children'] + len(futures) + 1:06d}"
                     parent = self._parent()
-                    self.state["pending"].append({"id": id, "parent_id": parent})
+                    archive_snapshot = None
+                    if self.archive_provider is not None:
+                        archive_snapshot = self.archive_provider.snapshot(
+                            self.store.root, id, parent, dict(self.state["records"])
+                        )
+                    self.state["pending"].append({
+                        "id": id, "parent_id": parent,
+                        **({"archive_snapshot": archive_snapshot} if archive_snapshot else {}),
+                    })
                     self._checkpoint()
-                    futures[executor.submit(self._child, id, parent)] = id
+                    futures[executor.submit(self._child, id, parent, archive_snapshot)] = id
                     logger.info("Started candidate=%s parent=%s", id, parent)
                 if not futures:
                     break
