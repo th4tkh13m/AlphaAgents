@@ -1,0 +1,445 @@
+{
+  "algorithm": "quota-app-tag-sha256-v1",
+  "complement": [
+    "ExpenseAddMultiple",
+    "FilesMoveFile",
+    "MarkorAddNoteHeader",
+    "OsmAndMarker",
+    "RecipeAddMultipleRecipesFromMarkor",
+    "RecipeAddSingleRecipe",
+    "SimpleCalendarAddOneEventTomorrow",
+    "SimpleCalendarEventsOnDate",
+    "SimpleDrawProCreateDrawing",
+    "SportsTrackerActivityDuration"
+  ],
+  "coverage": {
+    "app_labels": {
+      "full": 16,
+      "omitted": [
+        "Broccoli",
+        "Files",
+        "OpenTracks",
+        "OsmAnd",
+        "Pro Expense",
+        "Simple Draw Pro"
+      ],
+      "selected": 10
+    },
+    "apps": [
+      {
+        "full": 1,
+        "label": "Audio Recorder",
+        "selected": 1
+      },
+      {
+        "full": 2,
+        "label": "Broccoli",
+        "selected": 0
+      },
+      {
+        "full": 1,
+        "label": "Chrome / local HTML",
+        "selected": 1
+      },
+      {
+        "full": 1,
+        "label": "Contacts",
+        "selected": 1
+      },
+      {
+        "full": 1,
+        "label": "Files",
+        "selected": 0
+      },
+      {
+        "full": 1,
+        "label": "Gallery / Files",
+        "selected": 1
+      },
+      {
+        "full": 1,
+        "label": "Joplin",
+        "selected": 1
+      },
+      {
+        "full": 2,
+        "label": "Markor",
+        "selected": 1
+      },
+      {
+        "full": 1,
+        "label": "OpenTracks",
+        "selected": 0
+      },
+      {
+        "full": 1,
+        "label": "OsmAnd",
+        "selected": 0
+      },
+      {
+        "full": 1,
+        "label": "Pro Expense",
+        "selected": 0
+      },
+      {
+        "full": 1,
+        "label": "Retro Music",
+        "selected": 1
+      },
+      {
+        "full": 3,
+        "label": "Simple Calendar Pro",
+        "selected": 1
+      },
+      {
+        "full": 1,
+        "label": "Simple Draw Pro",
+        "selected": 0
+      },
+      {
+        "full": 1,
+        "label": "Simple SMS Messenger",
+        "selected": 1
+      },
+      {
+        "full": 1,
+        "label": "Tasks",
+        "selected": 1
+      }
+    ],
+    "effective_weighted_tasks": 9.795918367346939,
+    "failure_modes": "unknown",
+    "runtime_representativeness": "unmeasured",
+    "tags": {
+      "full": 12,
+      "omitted": [],
+      "selected": 12
+    }
+  },
+  "manifest_id": "bb2790e282367ba04f3afc3caef64580783b43efa24f2ce786827a8e2e2cb549",
+  "protected_confirmation": [
+    "AudioRecorderRecordAudio",
+    "BrowserDraw",
+    "BrowserMaze",
+    "CameraTakeVideo",
+    "ClockStopWatchRunning",
+    "ClockTimerEntry",
+    "ContactsNewContactDraft",
+    "ExpenseAddMultipleFromGallery",
+    "ExpenseAddMultipleFromMarkor",
+    "ExpenseAddSingle",
+    "ExpenseDeleteDuplicates",
+    "ExpenseDeleteDuplicates2",
+    "ExpenseDeleteMultiple",
+    "ExpenseDeleteMultiple2",
+    "ExpenseDeleteSingle",
+    "FilesDeleteFile",
+    "MarkorChangeNoteContent",
+    "MarkorCreateFolder",
+    "MarkorCreateNote",
+    "MarkorCreateNoteFromClipboard",
+    "MarkorDeleteAllNotes",
+    "MarkorDeleteNewestNote",
+    "MarkorDeleteNote",
+    "MarkorEditNote",
+    "MarkorMergeNotes",
+    "MarkorMoveNote",
+    "MarkorTranscribeReceipt",
+    "MarkorTranscribeVideo",
+    "NotesIsTodo",
+    "NotesRecipeIngredientCount",
+    "NotesTodoItemCount",
+    "OsmAndFavorite",
+    "OsmAndTrack",
+    "RecipeAddMultipleRecipes",
+    "RecipeAddMultipleRecipesFromImage",
+    "RecipeAddMultipleRecipesFromMarkor2",
+    "RecipeDeleteDuplicateRecipes",
+    "RecipeDeleteDuplicateRecipes2",
+    "RecipeDeleteDuplicateRecipes3",
+    "RecipeDeleteMultipleRecipes",
+    "RecipeDeleteMultipleRecipesWithConstraint",
+    "RecipeDeleteMultipleRecipesWithNoise",
+    "RecipeDeleteSingleRecipe",
+    "RecipeDeleteSingleWithRecipeWithNoise",
+    "RetroPlayingQueue",
+    "RetroPlaylistDuration",
+    "RetroSavePlaylist",
+    "SimpleCalendarAddOneEvent",
+    "SimpleCalendarAddOneEventInTwoWeeks",
+    "SimpleCalendarAddOneEventRelativeDay",
+    "SimpleCalendarAddRepeatingEvent",
+    "SimpleCalendarAnyEventsOnDate",
+    "SimpleCalendarDeleteEvents",
+    "SimpleCalendarDeleteOneEvent",
+    "SimpleCalendarEventOnDateAtTime",
+    "SimpleCalendarEventsInNextWeek",
+    "SimpleCalendarEventsInTimeRange",
+    "SimpleCalendarFirstEventAfterStartTime",
+    "SimpleCalendarLocationOfEvent",
+    "SimpleCalendarNextEvent",
+    "SimpleCalendarNextMeetingWithPerson",
+    "SimpleSmsReply",
+    "SimpleSmsReplyMostRecent",
+    "SimpleSmsResend",
+    "SimpleSmsSend",
+    "SimpleSmsSendReceivedAddress",
+    "SportsTrackerActivitiesCountForWeek",
+    "SportsTrackerActivitiesOnDate",
+    "SportsTrackerLongestDistanceActivity",
+    "SportsTrackerTotalDistanceForCategoryOverInterval",
+    "SportsTrackerTotalDurationForCategoryThisWeek",
+    "SystemBluetoothTurnOffVerify",
+    "SystemBluetoothTurnOn",
+    "SystemBluetoothTurnOnVerify",
+    "SystemBrightnessMax",
+    "SystemBrightnessMaxVerify",
+    "SystemBrightnessMin",
+    "SystemBrightnessMinVerify",
+    "SystemWifiTurnOff",
+    "SystemWifiTurnOffVerify",
+    "SystemWifiTurnOn",
+    "SystemWifiTurnOnVerify",
+    "TasksCompletedTasksForDate",
+    "TasksDueNextWeek",
+    "TasksDueOnDate",
+    "TasksHighPriorityTasksDueOnDate",
+    "TasksIncompleteTasksOnDate",
+    "TurnOffWifiAndTurnOnBluetooth",
+    "TurnOnWifiAndOpenApp",
+    "VlcCreatePlaylist",
+    "VlcCreateTwoPlaylists"
+  ],
+  "screen": [
+    "CameraTakePhoto",
+    "ClockStopWatchPausedVerify",
+    "OpenAppTaskEval",
+    "SystemBluetoothTurnOff",
+    "SystemCopyToClipboard"
+  ],
+  "seed": 42,
+  "selection": [
+    "AudioRecorderRecordAudioWithFileName",
+    "BrowserMultiply",
+    "ContactsAddContact",
+    "ExpenseAddMultiple",
+    "FilesMoveFile",
+    "MarkorAddNoteHeader",
+    "MarkorCreateNoteAndSms",
+    "NotesMeetingAttendeeCount",
+    "OsmAndMarker",
+    "RecipeAddMultipleRecipesFromMarkor",
+    "RecipeAddSingleRecipe",
+    "RetroCreatePlaylist",
+    "SaveCopyOfReceiptTaskEval",
+    "SimpleCalendarAddOneEventTomorrow",
+    "SimpleCalendarDeleteEventsOnRelativeDay",
+    "SimpleCalendarEventsOnDate",
+    "SimpleDrawProCreateDrawing",
+    "SimpleSmsSendClipboardContent",
+    "SportsTrackerActivityDuration",
+    "TasksHighPriorityTasks"
+  ],
+  "source_manifest_hash": "379cc4939cd698f96a3744e903fc3a7ca34f0cc61697a9bd794c64069812f345",
+  "strata": [
+    {
+      "difficulty": "easy",
+      "family": "Direct",
+      "full": 6,
+      "selected": 3
+    },
+    {
+      "difficulty": "hard",
+      "family": "Direct",
+      "full": 5,
+      "selected": 3
+    },
+    {
+      "difficulty": "medium",
+      "family": "Direct",
+      "full": 5,
+      "selected": 2
+    },
+    {
+      "difficulty": "easy",
+      "family": "Information retrieval",
+      "full": 2,
+      "selected": 1
+    },
+    {
+      "difficulty": "medium",
+      "family": "Information retrieval",
+      "full": 2,
+      "selected": 1
+    }
+  ],
+  "tasks": [
+    {
+      "app_domain": "Audio Recorder",
+      "difficulty": "easy",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "complex_ui_understanding",
+        "data_entry",
+        "parameterized"
+      ],
+      "task": "AudioRecorderRecordAudioWithFileName",
+      "weight": {
+        "denominator": 10,
+        "display": 0.1,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Chrome / local HTML",
+      "difficulty": "hard",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "math_counting",
+        "memorization",
+        "screen_reading"
+      ],
+      "task": "BrowserMultiply",
+      "weight": {
+        "denominator": 12,
+        "display": 0.08333333333333333,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Contacts",
+      "difficulty": "easy",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "data_entry",
+        "parameterized"
+      ],
+      "task": "ContactsAddContact",
+      "weight": {
+        "denominator": 10,
+        "display": 0.1,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Markor",
+      "difficulty": "hard",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "data_entry",
+        "multi_app",
+        "parameterized"
+      ],
+      "task": "MarkorCreateNoteAndSms",
+      "weight": {
+        "denominator": 12,
+        "display": 0.08333333333333333,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Joplin",
+      "difficulty": "easy",
+      "family": "Information retrieval",
+      "stage": "selection",
+      "tags": [
+        "parameterized",
+        "search"
+      ],
+      "task": "NotesMeetingAttendeeCount",
+      "weight": {
+        "denominator": 10,
+        "display": 0.1,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Retro Music",
+      "difficulty": "medium",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "data_entry",
+        "parameterized",
+        "repetition"
+      ],
+      "task": "RetroCreatePlaylist",
+      "weight": {
+        "denominator": 8,
+        "display": 0.125,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Gallery / Files",
+      "difficulty": "hard",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "complex_ui_understanding",
+        "parameterized"
+      ],
+      "task": "SaveCopyOfReceiptTaskEval",
+      "weight": {
+        "denominator": 12,
+        "display": 0.08333333333333333,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Simple Calendar Pro",
+      "difficulty": "medium",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "data_edit",
+        "parameterized"
+      ],
+      "task": "SimpleCalendarDeleteEventsOnRelativeDay",
+      "weight": {
+        "denominator": 8,
+        "display": 0.125,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Simple SMS Messenger",
+      "difficulty": "easy",
+      "family": "Direct",
+      "stage": "selection",
+      "tags": [
+        "data_entry",
+        "parameterized"
+      ],
+      "task": "SimpleSmsSendClipboardContent",
+      "weight": {
+        "denominator": 10,
+        "display": 0.1,
+        "numerator": 1
+      }
+    },
+    {
+      "app_domain": "Tasks",
+      "difficulty": "medium",
+      "family": "Information retrieval",
+      "stage": "selection",
+      "tags": [
+        "complex_ui_understanding",
+        "information_retrieval",
+        "parameterized",
+        "search",
+        "transcription"
+      ],
+      "task": "TasksHighPriorityTasks",
+      "weight": {
+        "denominator": 10,
+        "display": 0.1,
+        "numerator": 1
+      }
+    }
+  ]
+}

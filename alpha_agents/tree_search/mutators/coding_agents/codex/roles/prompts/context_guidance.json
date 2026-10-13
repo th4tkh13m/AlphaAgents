@@ -1,0 +1,49 @@
+{
+  "utility_context": {
+    "version": "weighted-canonical-combined-v2",
+    "definition": "U is the sum of each supplied frozen evaluation weight times its canonical binary outcome. If weights are unequal, successes divided by case count is descriptive, not U. Use supplied score.u and score.j; F=(1-judge_weight)*U+judge_weight*J. Value predicts expected discounted continuing changes in this same F under the supplied policy and discount_factor, not final-minus-current utility, best-case success, or an unrestricted improvement ceiling. Evaluation semantics and domain details come only from supplied evidence and adapter context."
+  },
+  "trajectory_interpretation_contract": {
+    "version": "role-trajectory-temporal-grounding-v1",
+    "observations": "Establish the observation/action/result order from supplied metadata and actual record contracts. An observation before an action does not show its effect after execution. Distinguish intended operations, dispatched operations and confirmed effects. Do not assume a particular action schema, trace field name or observation modality.",
+    "causality": "Establish the required task operations before describing repetition as a loop. A timeout or recursion limit demonstrates unfinished work, not by itself a wrong action or a causal harness defect. Source-supported intervention hypotheses remain uncertain unless the relevant mechanism actually activated in the inspected trace.",
+    "coverage": "Report only records, events and observation artifacts actually inspected. Attribute supplied prior findings and preserve their stated limitations; do not claim another reviewer's inspection as your own."
+  },
+  "evidence_reference_contract": {
+    "version": "role-exact-evidence-references-v2",
+    "format": "Every evidence-array item must be a single exact supplied evidence ID or existing permitted file reference. Copy a supplied ID exactly; do not describe the invocation envelope or combine IDs, plan names, explanations, and paths in one item.",
+    "files": "Use a relative harness source path, optionally prefixed with code: and suffixed with one :line or :line:column, or an exact existing absolute file beneath a supplied canonical task evidence directory. A directory, prose sentence, file location range, guessed filename, or unprovided task hash is not a file citation.",
+    "ids": "Use IDs explicitly named by *_id or *_snapshot_id fields, supplied *_ids arrays, or the canonical_task_references index. A hash appearing only inside a path is not automatically a supplied symbolic ID.",
+    "snapshot_aliases": "Prefer a literal reference from available_snapshot_aliases below instead of retyping its hash. Use only this invocation's listed aliases; do not infer additional aliases from the role name, nested score data, earlier invocations, or other roles. Each listed alias names its exact supplied top-level string field. Identity output fields themselves must still contain the supplied exact values, as constrained by the schema.",
+    "separation": "Put reasoning, comparisons, uncertainty, and causal interpretations in their narrative fields. Before finishing, check that each cited file exists and was inspected, each symbolic ID is supplied, and no evidence-array item includes explanatory prose."
+  },
+  "judge_reference_contract": {
+    "version": "judge-exact-evidence-references-v2",
+    "identity": "Return canonical_evidence_id exactly as supplied in this canonical_evidence block. It is also the existing snapshot_id; do not return null or infer a different identity.",
+    "format": "Each dimension evidence entry is one exact existing file reference or supplied canonical evidence ID, never explanatory prose.",
+    "source_example": "code:src/processing.py:76",
+    "source_locations": "Use an optional single :line or :line:column suffix. No line ranges, combined locations, backticks, Source: prefix, or explanation inside the evidence string.",
+    "trajectories": "Cite an exact existing absolute file beneath a supplied canonical evidence directory. Identify inspected records/events and their meaning in rationale/findings, without assuming a modality, storage format or filename suffix.",
+    "separation": "Put explanations and missing-evidence caveats in rationale/findings/coverage. Do not cite an unseen file, an earlier model-authored path, or a directory as proof that its contents were inspected.",
+    "storage_hint": "Use the exact supplied file catalog and outcome identities. Do not assume filenames, package paths, storage formats or label meanings. An artifact-internal completion flag or a directory label is not an independent evaluator outcome. An empty export does not prove that the authoritative record is empty.",
+    "sqlite": "If a SQLite database is supplied, a nonempty WAL may contain committed records absent from the main file. Follow the shared scratch-copy protocol: copy the database and existing WAL/SHM companions together into assigned scratch, derive a standalone backup from the copy, and inspect only the copy/backup. Never checkpoint the canonical original, create sidecars beside it, or ignore a nonempty WAL. Report actual copy/read failures and use other permitted evidence when available. Use mode=ro&immutable=1 only for a sealed standalone copy with no nonempty WAL."
+  },
+  "unconfigured_verification_meaning": "When false, no prepared test environment is configured; other permitted tools may exist, but their dependencies must not be assumed. External execution diagnostics use only a separately admitted controller-owned channel when one is supplied.",
+  "verification_tools_purpose": "Prepared local verification environment. When supplied, use this exact trusted runner command followed by ordinary pytest arguments; inspect actual test paths and configuration. The runner may apply and report host-compatibility adjustments without changing assertions or permission boundaries. Do not alter artifact tests or runtime logic to compensate for a host restriction. Tool access does not grant edits outside the frozen plan scope. Record the actual completed command, result and remaining failures.",
+  "verification_scope_contract": {
+    "requirements": [
+      "Inspect the existing tests and their actual paths before freezing each intervention. Identify which assertions encode the behavior being changed, which regression checks remain applicable, and which new mechanism checks are necessary. Explain that inspection in the candidate's developed verification section.",
+      "Include each test file or narrowly scoped new test path that must be edited in intervention.scope, alongside the production edit paths. If the plan requires a new test, an updated mock, or a changed assertion, its scope must permit that exact work. Do not promise test changes while granting only production-file edits, and do not use an invented test directory when an existing repository test already owns the behavior.",
+      "Distinguish failures of the unmodified baseline, assertions that deliberately encode the previous behavior, and unrelated regressions. Describe the intended replacement assertion and the mechanism it checks. Do not delete checks or relabel failures merely to obtain a passing result. Read-only verification can use existing tests without adding their files to the edit scope.",
+      "The accepted scope becomes immutable. An implementer cannot widen it to repair an omitted test path. Keep archived plans unchanged and treat their scope omissions as evidence for future planning. Adding test paths to an otherwise identical intervention does not establish a diverse new mechanism or justify a same-parent duplicate."
+    ]
+  },
+  "novelty_admission_contract": {
+    "requirements": [
+      "Give every emitted Candidate metadata record an explicit novelty_status. Use new_action for a supported distinct intervention, or cross_parent_adaptation for a materially adapted intervention whose closest_plan_ids identify an archived plan at a different parent. Explain the actual executable difference in the developed novelty and diversity sections.",
+      "A same_parent_duplicate or scope_repair_only classification is not eligible for a Candidate section. Discuss those rejected ideas in Archive review or Diversity audit instead. Adding omitted test edits to the same mechanism does not create a new action. Never emit a Candidate whose own explanation concludes that it is a duplicate merely to satisfy the required three-plan count.",
+      "Produce exactly three admissible distinct candidates. Continue inspecting the harness and archive to find three supported causal interventions; preserve detailed diagnosis, novelty comparisons, and verification scope. If the investigation cannot support three, explain the unresolved blocker and rejected alternatives. An incomplete set is rejected and leaves expansion open for recovery; it is never accepted as terminal exhaustion. The validator rejects missing or ineligible classifications and incomplete cardinality; it does not certify semantic novelty from a status label alone.",
+      "Every ## Candidate heading denotes an action offered for admission; never use it for a rejected example. Discuss rejected mechanisms under level-three headings inside Archive review or Diversity audit. A novelty explanation that declares the candidate a same-parent duplicate contradicts new_action and is rejected."
+    ]
+  }
+}

@@ -1,8 +1,9 @@
-"""Run one self-improvement task with the OpenAI Codex Python SDK.
+"""Single subprocess entry point for DGM mutation and MCTS Codex roles.
 
-This is deliberately a thin adapter: DGM continues to own parent-patch
-reconstruction, evaluation, archive admission, and persistence.  Codex owns
-only the engineering goal that edits the reconstructed checkout.
+The ``role`` subcommand delegates native Plan/Goal and assessment execution to
+``roles.adapter``. The existing DGM CLI reconstructs its supplied engineering
+context and runs a persisted goal. Search, evaluation, artifact admission, and
+backup remain owned by their controllers and bridges.
 """
 
 import argparse
@@ -10,13 +11,29 @@ import datetime
 import json
 import os
 import subprocess
-import time
+import sys
 from pathlib import Path
 
 if __package__:
-    from .rollout_watch import LiveRolloutWatcher
+    from .execution import (
+        _collect_goal,
+        _goal_snapshot,
+        _preflight_launcher,
+        _require_idle_thread,
+        run_watched_goal,
+    )
+    from .execution import _resume_goal_operation as _resume_goal_operation
+    from .sdk_serialization import to_jsonable
 else:
-    from rollout_watch import LiveRolloutWatcher
+    from execution import (
+        _collect_goal,
+        _goal_snapshot,
+        _preflight_launcher,
+        _require_idle_thread,
+        run_watched_goal,
+    )
+    from execution import _resume_goal_operation as _resume_goal_operation
+    from sdk_serialization import to_jsonable
 
 
 DEFAULT_MODEL = "gpt-5.6-luna"
@@ -29,14 +46,7 @@ PROMPT_TEMPLATE_PATH = Path(
 
 
 def _jsonable(value):
-    """Serialize SDK/Pydantic objects without losing tool-call evidence."""
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", by_alias=True)
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return str(value)
+    return to_jsonable(value, legacy_strings=True)
 
 
 def _git_evidence(git_dir: str, base_commit: str) -> dict:
@@ -106,13 +116,10 @@ def write_goal_context(git_dir: str, instruction: str) -> Path:
 
 
 def build_goal_objective(context_path: Path) -> str:
-    """Keep the persisted SDK goal short; the complete context is in-file."""
-    return (
-        f"Resolve the evidence-grounded DGM child objective in `{context_path.name}`. "
-        "Read that file first, then persist through diagnosis, any needed general implementation work, "
-        "focused tests, and verification. Make the required workspace edits; do not merely "
-        "describe a solution. Respect every benchmark-boundary constraint in that file."
-    )
+    """Render the external persisted-goal objective with its context filename."""
+    return Path(__file__).with_name("goal_objective.md").read_text(
+        encoding="utf-8"
+    ).format(context_filename=context_path.name)
 
 
 def run_goal_or_turn(thread, instruction: str, git_dir: str, effort: str):
@@ -121,17 +128,8 @@ def run_goal_or_turn(thread, instruction: str, git_dir: str, effort: str):
     if client is not None and hasattr(client, "start_goal_operation"):
         # ``thread/goal/set`` is the SDK equivalent of Codex's /goal command.
         # It may span multiple physical turns; collect it as one logical result.
-        from openai_codex._goal import _GoalNotificationStream
-        from openai_codex._run import _collect_turn_result
-
         state, turn_id = client.start_goal_operation(thread.id, instruction)
-        stream = _GoalNotificationStream(
-            state=state,
-            next_notification=lambda: client.next_goal_notification(state),
-            unregister=lambda: client.unregister_goal_operation(state),
-            cancel_goal=lambda: client.cancel_goal_operation(state),
-        )
-        return _collect_turn_result(stream, turn_id=turn_id), "goal"
+        return _collect_goal(client, state, turn_id), "goal"
 
     # Test doubles and older SDK releases do not expose persisted goals.
     if hasattr(thread, "turn"):
@@ -141,99 +139,9 @@ def run_goal_or_turn(thread, instruction: str, git_dir: str, effort: str):
     return thread.run(instruction, cwd=git_dir, effort=effort), "turn_compatibility"
 
 
-def _goal_snapshot(client, thread_id: str):
-    from openai_codex.generated.v2_all import ThreadGoalGetResponse
-
-    return client.request(
-        "thread/goal/get", {"threadId": thread_id}, response_model=ThreadGoalGetResponse
-    ).goal
 
 
-def _collect_goal(client, state, turn_id: str):
-    from openai_codex._goal import _GoalNotificationStream
-    from openai_codex._run import _collect_turn_result
 
-    stream = _GoalNotificationStream(
-        state=state,
-        next_notification=lambda: client.next_goal_notification(state),
-        unregister=lambda: client.unregister_goal_operation(state),
-        cancel_goal=lambda: client.cancel_goal_operation(state),
-    )
-    return _collect_turn_result(stream, turn_id=turn_id)
-
-
-def _resume_goal_operation(client, thread_id: str):
-    """Resume the stored goal without clearing its objective or usage."""
-    from openai_codex.generated.v2_all import ThreadGoalStatus
-
-    state = client.reserve_goal_operation(thread_id)
-    activated = False
-    try:
-        state.activate_turn_routing()
-        client.thread_goal_set(thread_id, status=ThreadGoalStatus.active)
-        activated = True
-        turn_id = state.wait_for_start(30)
-        if turn_id is None:
-            raise RuntimeError("stored Codex goal did not start after resume")
-        return state, turn_id
-    except BaseException:
-        if activated:
-            client.cancel_goal_operation(state)
-        state.finish()
-        client.unregister_goal_operation(state)
-        raise
-
-
-def run_watched_goal(thread, instruction: str | None, *, resume: bool = False):
-    """Run one goal attempt and request a pause on a persistent launch failure."""
-    client = thread._client
-    if resume:
-        record = client.thread_read(thread.id).thread
-        if not record.path:
-            raise RuntimeError(
-                "persisted Codex thread has no rollout path before resume"
-            )
-        rollout_path = Path(record.path)
-        start_offset = rollout_path.stat().st_size
-        state, turn_id = _resume_goal_operation(client, thread.id)
-    else:
-        state, turn_id = client.start_goal_operation(thread.id, instruction)
-        record = client.thread_read(thread.id).thread
-        if not record.path:
-            client.cancel_goal_operation(state)
-            raise RuntimeError(
-                "persisted Codex thread has no rollout path after goal start"
-            )
-        rollout_path = Path(record.path)
-        start_offset = 0
-
-    def on_incident(_incident):
-        if not state.is_finished():
-            client.cancel_goal_operation(state)
-
-    watcher = LiveRolloutWatcher(rollout_path, on_incident, start_offset=start_offset)
-    watcher.start()
-    try:
-        result = _collect_goal(client, state, turn_id)
-    finally:
-        watcher.stop()
-    if watcher.error:
-        raise RuntimeError(f"Codex rollout watcher failed: {watcher.error}")
-    goal = _goal_snapshot(client, thread.id)
-    return result, watcher.incident, goal
-
-
-def _require_idle_thread(client, thread_id: str, timeout_seconds: float = 10) -> None:
-    from openai_codex.generated.v2_all import IdleThreadStatus
-
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if isinstance(
-            client.thread_read(thread_id).thread.status.root, IdleThreadStatus
-        ):
-            return
-        time.sleep(0.2)
-    raise RuntimeError("Codex turn remained active after goal pause; restart aborted")
 
 
 def _record_recovery(telemetry_file: str | None, event: dict) -> None:
@@ -244,20 +152,6 @@ def _record_recovery(telemetry_file: str | None, event: dict) -> None:
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(event, default=str) + "\n")
 
-
-def _preflight_launcher(client) -> None:
-    """Check the new app-server's command launcher before reactivating a goal."""
-    from openai_codex.generated.v2_all import CommandExecResponse
-
-    result = client.request(
-        "command/exec",
-        {"command": ["pwd"], "cwd": "/tmp", "timeoutMs": 5000},
-        response_model=CommandExecResponse,
-    )
-    if result.exit_code != 0 or result.stdout.strip() != "/tmp":
-        raise RuntimeError(
-            f"Codex launcher preflight failed: {result.model_dump(mode='json')}"
-        )
 
 
 def run_codex(
@@ -421,6 +315,13 @@ def run_codex(
 
 
 def main() -> None:
+    arguments = sys.argv[1:]
+    if arguments and arguments[0] == "role":
+        from alpha_agents.tree_search.mutators.coding_agents.codex.roles.adapter import (
+            main as run_role,
+        )
+        run_role(arguments[1:])
+        return
     parser = argparse.ArgumentParser(description="Codex SDK self-improvement worker.")
     parser.add_argument(
         "--context", required=True, help="Controller-owned mutation context JSON."
@@ -433,7 +334,7 @@ def main() -> None:
     parser.add_argument(
         "--model", default=os.environ.get("DGM_CODEX_MODEL", DEFAULT_MODEL)
     )
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
 
     context = json.loads(Path(args.context).read_text(encoding="utf-8"))
     evidence_bundle = json.dumps(context.get("evidence", {}))

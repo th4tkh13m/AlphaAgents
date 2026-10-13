@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import queue
+import shutil
 import sys
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-import shutil
 
-from ...core.dgm.contracts import Candidate, Evaluation, MutationContext, RequiredEvaluationError
+from ...core.dgm.contracts import (
+    Candidate,
+    Evaluation,
+    MutationContext,
+    RequiredEvaluationError,
+)
 from ...core.shared.storage import write_json
 from .task_sets import STAGES, load_sets, stage_tasks
 

@@ -10,13 +10,15 @@ import os
 import shlex
 import shutil
 import tempfile
+import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from ...infrastructure.process import execute
 from .evaluation import atomic_json
 from .runtime import evaluation_lock, read_json
-from .task_sets import stage_tasks
 from .task_outcomes import is_bounded_agent_failure
+from .task_sets import stage_tasks
 
 ROLES = (
     "planner",
@@ -138,6 +140,8 @@ def runner_command(worktree, output, tasks, config):
     ]
     if config.get("perform_emulator_setup", False):
         command.append("--perform-emulator-setup")
+    if config.get("phase_supervision", False):
+        command.extend(["--phase-file", str(Path(output).resolve() / "phases.json")])
     return command
 
 
@@ -167,6 +171,8 @@ def execution_environment(worktree, output, config):
         if config.get("fixture_preflight", True)
         else "0",
         ARTEMIS_TRACES_DIR=str(output / "runtime"),
+        ARTEMIS_APP_DIR=str(output / "runtime" / "app_state"),
+        ARTEMIS_USE_USER_DIR="true",
         ARTEMIS_MODEL=config["model"],
         OPENAI_BASE_URL=config["base_url"],
         OPENAI_API_KEY=env.get("OPENAI_API_KEY", "EMPTY"),
@@ -194,11 +200,17 @@ def normalize_manifest(manifest, tasks, config, process):
             "Manifest is incomplete or does not match the evaluation contract"
         )
     episodes = manifest.get("episodes", [])
+    if config.get("phase_supervision", False) and manifest.get("cleanup_status") != "completed":
+        errors.append("Singleton runner did not confirm completed cleanup")
     keys = [(episode.get("template"), episode.get("index")) for episode in episodes]
     if len(keys) != len(tasks) or set(keys) != {(task, 0) for task in tasks}:
         errors.append("Missing, duplicate, or unexpected task instances")
     results = []
     for episode in episodes:
+        if config.get("phase_supervision", False):
+            expected_seed = int(hashlib.sha256(f"{config['seed']}_{episode.get('template')}_0".encode()).hexdigest(), 16) % (2**32)
+            if episode.get("seed") != expected_seed:
+                errors.append("Singleton task generated seed does not match the frozen instance")
         score = episode.get("success")
         reward = episode.get("androidworld_reward")
         agent_failed = is_bounded_agent_failure(episode)
@@ -246,7 +258,7 @@ def normalize_manifest(manifest, tasks, config, process):
     }
 
 
-def run_stage(worktree, output, stage, config, lock_root, *, tasks=None):
+def run_stage(worktree, output, stage, config, lock_root, *, tasks=None, already_locked=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     tasks = stage_tasks(config["task_file"], stage) if tasks is None else tasks
@@ -267,11 +279,19 @@ def run_stage(worktree, output, stage, config, lock_root, *, tasks=None):
             "config": config,
         },
     )
-    with evaluation_lock(lock_root, config["androidworld_assigned_device"]):
+    with (nullcontext() if already_locked else evaluation_lock(lock_root, config["androidworld_assigned_device"])):
         env = execution_environment(worktree, output, config)
-        process, _ = execute(
-            command, Path(worktree), output / "runner", config["stage_timeout"], env
-        )
+        supervision = ({"phase_path": output / "phases.json",
+                        "phase_limits": {"startup": 120, "task": config["task_timeout"], "cleanup": 180}}
+                       if config.get("phase_supervision", False) else {})
+        timeout = config["stage_timeout"]
+        if supervision and config.get("device_lease_started_monotonic") is not None:
+            elapsed = time.monotonic() - config["device_lease_started_monotonic"]
+            supervision["phase_limits"]["startup"] = 120 - elapsed
+            timeout = min(timeout, 2100 - elapsed)
+            if supervision["phase_limits"]["startup"] <= 0 or timeout <= 0:
+                raise TimeoutError("Device startup envelope exhausted before trusted runner launch")
+        process, _ = execute(command, Path(worktree), output / "runner", timeout, env, **supervision)
     try:
         manifest = read_json(output / "manifest.json")
     except (OSError, ValueError):
@@ -295,6 +315,8 @@ def mutation_context(candidate, parent, resource):
         "DGM_ARTEMIS_OPENAI_MEMORY_COMPAT",
         "DGM_ANDROIDWORLD_FIXTURE_PREFLIGHT",
         "ARTEMIS_TRACES_DIR",
+        "ARTEMIS_APP_DIR",
+        "ARTEMIS_USE_USER_DIR",
         "ARTEMIS_MODEL",
         "OPENAI_BASE_URL",
         "LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S",

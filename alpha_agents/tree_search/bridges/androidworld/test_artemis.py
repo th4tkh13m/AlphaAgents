@@ -9,9 +9,12 @@ import pytest
 
 from alpha_agents.tree_search.bridges.androidworld import artemis
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
+from alpha_agents.tree_search.bridges.androidworld.task_outcomes import (
+    MissingAgentAnswerError,
+    bounded_agent_failure,
+)
 from alpha_agents.tree_search.core.dgm.contracts import Candidate
 from alpha_agents.tree_search.core.dgm.workspace import materialize
-from alpha_agents.tree_search.bridges.androidworld.task_outcomes import MissingAgentAnswerError, bounded_agent_failure
 
 
 def settings(tmp_path):
@@ -160,6 +163,17 @@ def test_optional_routes_use_the_assigned_model_including_fallback(tmp_path):
         assert llm[name]["model"] == config["model"]
         assert llm[name]["fallback"] == {"provider": "openai", "model": config["model"]}
     assert env["OPENAI_BASE_URL"] == config["base_url"]
+
+
+def test_runtime_app_state_is_isolated_per_execution(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARTEMIS_APP_DIR", str(tmp_path / "shared-app-state"))
+    monkeypatch.setenv("ARTEMIS_USE_USER_DIR", "false")
+    config = settings(tmp_path)
+    first = artemis.execution_environment(tmp_path, tmp_path / "first", config)
+    second = artemis.execution_environment(tmp_path, tmp_path / "second", config)
+    assert first["ARTEMIS_APP_DIR"] == str(tmp_path / "first/runtime/app_state")
+    assert second["ARTEMIS_APP_DIR"] == str(tmp_path / "second/runtime/app_state")
+    assert first["ARTEMIS_USE_USER_DIR"] == second["ARTEMIS_USE_USER_DIR"] == "true"
 
 
 @pytest.mark.parametrize("score", [0, 1])

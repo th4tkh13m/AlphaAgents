@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from ..core.dgm.contracts import ValidationReport
-from ..core.dgm.workspace import git
+from ..core.shared.workspace import git
 from ..infrastructure.process import execute
 
 

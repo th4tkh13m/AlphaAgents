@@ -26,8 +26,10 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ARTEMIS_ROOT))
 sys.path.insert(0, str(ANDROID_WORLD_ROOT))
 
-from answer_handoff import AgentAnswer, submit_answer
-from task_outcomes import bounded_agent_failure
+# Trusted helper imports follow the explicit source-path bootstrap above.
+from answer_handoff import AgentAnswer, submit_answer  # noqa: E402
+from phase_watch import TASK_HANDOFF_SECONDS, run_task_bounded  # noqa: E402
+from task_outcomes import bounded_agent_failure  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--combinations", type=int, default=1)
+    parser.add_argument("--phase-file", type=Path, help="Trusted lifecycle record for supervised singleton execution")
     parser.add_argument(
         "--serial", default=os.environ.get("ANDROID_SERIAL", "emulator-5560")
     )
@@ -351,6 +354,26 @@ async def main_async(args: argparse.Namespace) -> int:
                     "goal": task.goal,
                 }
                 failure_phase = "setup"
+                task_phase_entered = False
+                cleanup_phase_entered = False
+
+                def begin_cleanup():
+                    nonlocal task_phase_entered, cleanup_phase_entered
+                    if not getattr(args, "phase_file", None) or cleanup_phase_entered:
+                        return
+                    from phase_watch import enter_phase
+                    if not task_phase_entered:
+                        enter_phase(args.phase_file, "task")
+                        task_phase_entered = True
+                    enter_phase(args.phase_file, "cleanup")
+                    cleanup_phase_entered = True
+                    metadata["cleanup_status"] = "started"
+                    manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
+
+                task_record["task_execution_timeout_seconds"] = args.task_timeout_seconds
+                task_record["phase_handoff_reserved_seconds"] = (
+                    TASK_HANDOFF_SECONDS if getattr(args, "phase_file", None) else 0
+                )
                 try:
                     await agent.init(device_serial=args.serial)
                     task.initialize_task(env)
@@ -367,9 +390,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     )
                     request.with_trace_recording(enabled=True, path=str(traces))
                     failure_phase = "agent_execution"
-                    agent_output = await asyncio.wait_for(
+                    if getattr(args, "phase_file", None):
+                        from phase_watch import enter_phase
+                        enter_phase(args.phase_file, "task")
+                        task_phase_entered = True
+                    agent_output = await run_task_bounded(
                         agent.run_task(request=request.build()),
                         timeout=args.task_timeout_seconds,
+                        begin_cleanup=begin_cleanup if getattr(args, "phase_file", None) else None,
                     )
                     failure_phase = "answer_submission"
                     artemis_run = agent._tasks[-1]
@@ -404,12 +432,16 @@ async def main_async(args: argparse.Namespace) -> int:
                     task_record.update(bounded_agent_failure(exc, failure_phase))
                     failures += 1
                 finally:
+                    begin_cleanup()
                     if task.initialized:
                         try:
                             task.tear_down(env)
-                        except Exception:
-                            pass
+                        except Exception as cleanup_error:
+                            if getattr(args, "phase_file", None):
+                                metadata.setdefault("cleanup_errors", []).append(str(cleanup_error))
                     await agent.clean()
+                    if getattr(args, "phase_file", None):
+                        metadata["cleanup_status"] = "failed" if metadata.get("cleanup_errors") else "completed"
                 metadata["episodes"].append(task_record)
                 checkpoint.save_episodes([task_record], f"{task_name}_{index}")
                 metadata["successful"] = successes
@@ -430,11 +462,20 @@ async def main_async(args: argparse.Namespace) -> int:
         )
         manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
     env.close()
+    if getattr(args, "phase_file", None):
+        from phase_watch import enter_phase
+        enter_phase(args.phase_file, "finished")
+        manifest_path.write_text(json.dumps(metadata, indent=2) + "\n")
     return 0
 
 
 def main() -> int:
     args = parse_args()
+    if args.phase_file:
+        if args.combinations != 1 or not args.tasks or len(args.tasks.split(",")) != 1:
+            raise ValueError("Phase supervision requires exactly one task instance")
+        from phase_watch import enter_phase
+        enter_phase(args.phase_file, "startup")
     os.environ.setdefault(
         "ARTEMIS_TRACES_DIR", str(args.output_dir.resolve() / "runtime")
     )

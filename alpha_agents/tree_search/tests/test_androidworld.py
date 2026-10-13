@@ -6,6 +6,7 @@ if sys.platform == "win32":
     pytest.skip("AndroidWorld runtime requires Linux/WSL", allow_module_level=True)
 
 import pytest
+
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
 from alpha_agents.tree_search.core.dgm.contracts import Candidate
 

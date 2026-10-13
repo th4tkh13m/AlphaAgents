@@ -1,0 +1,157 @@
+"""Contracts between the fixed search protocol and external integrations.
+
+Adapters own their runtime details. The default base classes are useful for
+uncached, in-process integrations; durable evaluators must override verification
+and reconciliation instead of accepting these no-op defaults.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Callable, Mapping, Protocol
+
+from .contracts import fingerprint
+from .role_contracts import RoleRequest
+
+
+@dataclass(frozen=True)
+class RoleSettings:
+    model: str
+    effort: str
+
+    def __post_init__(self):
+        if not self.model or not self.effort:
+            raise ValueError("Explicit model and reasoning effort are required")
+
+
+class DiagnosticService(Protocol):
+    """Invocation-scoped diagnostics, serviced only during implementation."""
+
+    root: Path
+
+    @property
+    def channel(self) -> dict[str, Any]: ...
+    def handle(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+    def validate_handoff(self, result: dict[str, Any]) -> None: ...
+
+
+class RoleGateway(Protocol):
+    telemetry_name: str
+    supports_checks: bool
+
+    def preflight(self) -> dict[str, Any]: ...
+    def enrich_context(self, role: str, context: dict[str, Any]) -> dict[str, Any]: ...
+    def prepare_request(self, run_id: str, request_id: str, role: str, artifact_id: str,
+                        model: str, effort: str, context: dict[str, Any]) -> RoleRequest: ...
+    def observed_usage(self, directory: Path) -> dict[str, Any]: ...
+    def invoke(self, request: RoleRequest, workspace: Path) -> dict[str, Any]: ...
+    def invoke_with_checks(self, request: RoleRequest, workspace: Path,
+                           service: DiagnosticService) -> dict[str, Any]: ...
+
+
+class RoleAdapter(ABC):
+    """Explicit defaults for integrations without preflight or diagnostics."""
+
+    telemetry_name = "role_execution"
+    supports_checks = False
+
+    def preflight(self) -> dict[str, Any]:
+        return {}
+
+    def enrich_context(self, role: str, context: dict[str, Any]) -> dict[str, Any]:
+        context = dict(context)
+        if role == "value":
+            context["continuation_role_protocol"] = {
+                **context["continuation_role_protocol"],
+                "proposer_mode": "in_process", "implementer_mode": "in_process",
+                "implementation_verification": {"prepared_environment_configured": False},
+            }
+        return context
+
+    def observed_usage(self, directory: Path) -> dict[str, Any]:
+        return {}
+
+    @abstractmethod
+    def prepare_request(self, run_id: str, request_id: str, role: str, artifact_id: str,
+                        model: str, effort: str, context: dict[str, Any]) -> RoleRequest:
+        raise NotImplementedError
+
+    @abstractmethod
+    def invoke(self, request: RoleRequest, workspace: Path) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def invoke_with_checks(self, request: RoleRequest, workspace: Path,
+                           service: DiagnosticService) -> dict[str, Any]:
+        raise NotImplementedError("This role adapter does not support implementation diagnostics")
+
+
+@dataclass(frozen=True)
+class StageEvidence:
+    artifact_id: str
+    stage: str
+    outcomes: Mapping[str, bool]
+    evidence: tuple[str, ...]
+
+    def __post_init__(self):
+        if not self.artifact_id or self.stage not in {"screen", "s0", "selection", "targeted"}:
+            raise ValueError("Exact artifact and permitted evaluation stage required")
+        if any(not isinstance(outcome, bool) for outcome in self.outcomes.values()):
+            raise ValueError("Stage evidence contains normalized binary successes only")
+        if not self.evidence:
+            raise ValueError("A completed stage requires trusted evidence references")
+
+    def validate_tasks(self, tasks):
+        if set(self.outcomes) != set(tasks) or len(tasks) != len(set(tasks)):
+            raise ValueError("Exactly one valid outcome per requested stage task is required")
+
+    @property
+    def identity(self) -> str:
+        return fingerprint(asdict(self))
+
+
+class StagedEvaluator(Protocol):
+    telemetry_name: str
+    supports_checks: bool
+
+    def preflight(self, source: Path) -> dict[str, Any]: ...
+    def for_owner(self, owner: str) -> StagedEvaluator: ...
+    def prepare(self, artifact: str, stages: Mapping[str, tuple[str, ...]]) -> None: ...
+    def evaluate(self, artifact: str, workspace: Path, stage: str,
+                 tasks: tuple[str, ...]) -> StageEvidence: ...
+    def verify_stage(self, evidence: StageEvidence) -> None: ...
+    def reconcile_interrupted(self, process_dead: Callable[[Path], bool]) -> None: ...
+
+
+class EvaluationAdapter(ABC):
+    """Defaults for an uncached evaluator with no external background work.
+
+Implementations must support concurrent calls or return owner-specific sessions.
+Evidence roots follow the requested task order; shared bundles may have fewer
+references than tasks. Persistent integrations must verify reused evidence and
+reconcile their own processes and task state.
+"""
+
+    telemetry_name = "evaluation"
+    supports_checks = False
+
+    def preflight(self, source: Path) -> dict[str, Any]:
+        return {}
+
+    def for_owner(self, owner: str) -> StagedEvaluator:
+        return self
+
+    def prepare(self, artifact: str, stages: Mapping[str, tuple[str, ...]]) -> None:
+        pass
+
+    @abstractmethod
+    def evaluate(self, artifact: str, workspace: Path, stage: str,
+                 tasks: tuple[str, ...]) -> StageEvidence:
+        raise NotImplementedError
+
+    def verify_stage(self, evidence: StageEvidence) -> None:
+        pass
+
+    def reconcile_interrupted(self, process_dead: Callable[[Path], bool]) -> None:
+        pass

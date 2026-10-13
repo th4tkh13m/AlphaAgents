@@ -1,12 +1,13 @@
 import copy
 import json
-from pathlib import Path
 
 import pytest
 
 from alpha_agents.tree_search.bridges.androidworld import benchmark
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
-from alpha_agents.tree_search.core.dgm.contracts import Candidate, RequiredEvaluationError
+from alpha_agents.tree_search.core.dgm.contracts import (
+    Candidate,
+)
 from alpha_agents.tree_search.core.shared.storage import write_json
 
 
@@ -76,7 +77,8 @@ def test_parallel_merge_rejects_missing_duplicate_and_invalid_scores():
     assert benchmark.merge_summaries([good], ["x"], config)["status"] == "completed"
     assert benchmark.merge_summaries([good, good], ["x"], config)["status"] == "invalid_runtime"
     assert benchmark.merge_summaries([good], ["x", "y"], config)["status"] == "invalid_runtime"
-    bad = copy.deepcopy(good); bad["task_results"][0]["score"] = None
+    bad = copy.deepcopy(good)
+    bad["task_results"][0]["score"] = None
     assert benchmark.merge_summaries([bad], ["x"], config)["status"] == "invalid_runtime"
 
 
@@ -100,8 +102,10 @@ def test_parallel_batches_really_overlap(setup, monkeypatch):
 
 
 def test_cache_identity_changes_with_agent_evaluator_model_seed_and_runtime(tmp_path, monkeypatch):
-    workspace = tmp_path / "agent"; workspace.mkdir()
-    evaluator = tmp_path / "evaluator"; evaluator.mkdir()
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    evaluator = tmp_path / "evaluator"
+    evaluator.mkdir()
     (workspace / "agent.py").write_text("agent version 1")
     (evaluator / "task.py").write_text("grader version 1")
     task_file = tmp_path / "tasks.json"
@@ -160,6 +164,7 @@ def test_child_screen_gate_precedes_selection_and_never_supplies_rank_score(
     bridge = object.__new__(AndroidWorldBridge)
     bridge.config = config
     from contextlib import contextmanager
+
     from alpha_agents.tree_search.bridges.androidworld.task_sets import stage_tasks
 
     @contextmanager

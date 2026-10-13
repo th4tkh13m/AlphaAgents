@@ -1,0 +1,1 @@
+Resolve the evidence-grounded DGM child objective in `{context_filename}`. Read that file first, then persist through diagnosis, any needed general implementation work, focused tests, and verification. Make the required workspace edits; do not merely describe a solution. Respect every benchmark-boundary constraint in that file.
