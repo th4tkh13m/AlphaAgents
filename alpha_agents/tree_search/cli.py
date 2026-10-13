@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from .core.controller import DGMController, SearchConfig
+from .core.dgm.controller import DGMController, SearchConfig
 
 
 def resolve_config(config: dict, base: Path) -> dict:

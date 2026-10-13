@@ -1,6 +1,6 @@
 """Use an external code-editing process as the mutation backend."""
 
-from ..core.contracts import MutationOutcome
+from ..core.dgm.contracts import MutationOutcome
 from ..infrastructure.commands import expand_command
 from ..infrastructure.process import execute
 

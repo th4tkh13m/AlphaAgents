@@ -10,8 +10,8 @@ import pytest
 from alpha_agents.tree_search.bridges.androidworld import artemis
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
 from alpha_agents.tree_search.bridges.androidworld.devices import local_device_ports
-from alpha_agents.tree_search.core.contracts import MutationOutcome
-from alpha_agents.tree_search.core.controller import DGMController, SearchConfig
+from alpha_agents.tree_search.core.dgm.contracts import MutationOutcome
+from alpha_agents.tree_search.core.dgm.controller import DGMController, SearchConfig
 
 
 def ports():

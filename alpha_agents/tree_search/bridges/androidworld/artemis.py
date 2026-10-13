@@ -282,7 +282,7 @@ def run_stage(worktree, output, stage, config, lock_root, *, tasks=None):
 
 
 def mutation_context(candidate, parent, resource):
-    from ...core.contracts import MutationContext
+    from ...core.dgm.contracts import MutationContext
 
     tasks = stage_tasks(resource["task_file"], resource["score_stage"])
     output = candidate.directory / "mutation_experiment"

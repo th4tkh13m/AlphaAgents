@@ -6,8 +6,8 @@ import pytest
 
 from alpha_agents.tree_search.bridges.androidworld import benchmark
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
-from alpha_agents.tree_search.core.contracts import Candidate, RequiredEvaluationError
-from alpha_agents.tree_search.core.storage import write_json
+from alpha_agents.tree_search.core.dgm.contracts import Candidate, RequiredEvaluationError
+from alpha_agents.tree_search.core.shared.storage import write_json
 
 
 def manifest(tasks, config, reward=1.0):

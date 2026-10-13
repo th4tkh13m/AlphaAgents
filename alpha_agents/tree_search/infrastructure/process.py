@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ..core.storage import write_json
+from ..core.shared.storage import write_json
 
 logger = logging.getLogger(__name__)
 

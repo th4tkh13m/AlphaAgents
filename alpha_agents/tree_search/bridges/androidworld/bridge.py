@@ -9,8 +9,8 @@ from copy import deepcopy
 from pathlib import Path
 import shutil
 
-from ...core.contracts import Candidate, Evaluation, MutationContext, RequiredEvaluationError
-from ...core.storage import write_json
+from ...core.dgm.contracts import Candidate, Evaluation, MutationContext, RequiredEvaluationError
+from ...core.shared.storage import write_json
 from .task_sets import STAGES, load_sets, stage_tasks
 
 

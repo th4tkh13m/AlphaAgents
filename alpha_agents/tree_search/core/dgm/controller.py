@@ -13,6 +13,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ..shared.storage import read_json, write_json
+from ..shared.workspace import git
 from .contracts import (
     Candidate,
     CandidateValidator,
@@ -22,8 +24,8 @@ from .contracts import (
     RequiredEvaluationError,
     ValidationReport,
 )
-from .storage import RunStore, read_json, write_json
-from .workspace import git, materialize, recover_patch, source_digest
+from .storage import RunStore
+from .workspace import materialize, recover_patch, source_digest
 
 
 @dataclass(frozen=True)

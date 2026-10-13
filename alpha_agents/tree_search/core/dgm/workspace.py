@@ -1,4 +1,4 @@
-"""Generic candidate Git workspaces; no benchmark or SDK dependencies."""
+"""DGM candidate Git workspaces; no benchmark or SDK dependencies."""
 
 from __future__ import annotations
 
@@ -7,19 +7,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ..shared.storage import read_json, write_json
+from ..shared.workspace import git
 from .contracts import Candidate
-
-
-def git(workspace: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(workspace), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode:
-        raise RuntimeError(f"git {args[0]} failed: {result.stderr.strip()}")
-    return result.stdout.strip()
 
 
 def materialize(
@@ -68,7 +58,6 @@ def materialize(
     if parent:
         lineage = []
         current = parent
-        from .storage import read_json
 
         while current.parent_id is not None:
             lineage.append(current.patch)
@@ -104,7 +93,6 @@ def materialize(
     with exclude.open("a", encoding="utf-8") as stream:
         stream.write("\n.dgm_parent_evidence/\n.dgm_goal_context.md\n")
     base_commit = git(workspace, "rev-parse", "HEAD")
-    from .storage import write_json
 
     write_json(directory / "workspace.json", {"base_commit": base_commit})
     return Candidate(id, parent.id if parent else None, directory, base_commit)

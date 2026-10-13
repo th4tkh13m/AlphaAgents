@@ -12,9 +12,9 @@ from alpha_agents.tree_search import (
     SearchConfig,
 )
 from alpha_agents.tree_search.bridges.command import CommandBridge
-from alpha_agents.tree_search.core.contracts import MutationOutcome
-from alpha_agents.tree_search.core.storage import read_json, write_json
-from alpha_agents.tree_search.core.workspace import materialize
+from alpha_agents.tree_search.core.dgm.contracts import MutationOutcome
+from alpha_agents.tree_search.core.shared.storage import read_json, write_json
+from alpha_agents.tree_search.core.dgm.workspace import materialize
 from alpha_agents.tree_search.mutators.command import CommandMutator
 from helpers import Harness, Increment
 
@@ -53,7 +53,7 @@ def test_partial_mutation_is_evaluated(source, tmp_path):
 
 
 def test_required_baseline_failure_stops_before_mutation(source, tmp_path):
-    from alpha_agents.tree_search.core.contracts import RequiredEvaluationError
+    from alpha_agents.tree_search.core.dgm.contracts import RequiredEvaluationError
 
     class RequiredHarness(Harness):
         def evaluate(self, candidate, resource):

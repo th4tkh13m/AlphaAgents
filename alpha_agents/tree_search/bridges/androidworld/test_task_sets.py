@@ -12,7 +12,7 @@ from alpha_agents.tree_search.bridges.androidworld.task_sets import (
     load_sets,
     stage_tasks,
 )
-from alpha_agents.tree_search.core.contracts import Candidate
+from alpha_agents.tree_search.core.dgm.contracts import Candidate
 
 TASK_FILE = Path(__file__).with_name("tasks.json")
 

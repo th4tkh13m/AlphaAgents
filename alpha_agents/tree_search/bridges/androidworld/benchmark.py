@@ -9,9 +9,9 @@ from pathlib import Path
 import subprocess
 import time
 
-from ...core.contracts import RequiredEvaluationError
-from ...core.storage import read_json, write_json
-from ...core.workspace import git
+from ...core.dgm.contracts import RequiredEvaluationError
+from ...core.shared.storage import read_json, write_json
+from ...core.dgm.workspace import git
 from . import artemis
 from .runtime import evaluation_lock
 from .task_sets import load_sets, stage_tasks

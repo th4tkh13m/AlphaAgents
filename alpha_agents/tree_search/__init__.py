@@ -1,6 +1,6 @@
 """Harness-independent Darwin Goedel Machine search."""
 
-from .core.contracts import (
+from .core.dgm.contracts import (
     Candidate,
     CandidateValidator,
     Evaluation,
@@ -10,7 +10,7 @@ from .core.contracts import (
     MutationOutcome,
     ValidationReport,
 )
-from .core.controller import DGMController, SearchConfig
+from .core.dgm.controller import DGMController, SearchConfig
 
 __all__ = [
     "Candidate",

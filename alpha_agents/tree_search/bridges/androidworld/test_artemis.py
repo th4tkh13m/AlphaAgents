@@ -9,8 +9,8 @@ import pytest
 
 from alpha_agents.tree_search.bridges.androidworld import artemis
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
-from alpha_agents.tree_search.core.contracts import Candidate
-from alpha_agents.tree_search.core.workspace import materialize
+from alpha_agents.tree_search.core.dgm.contracts import Candidate
+from alpha_agents.tree_search.core.dgm.workspace import materialize
 from alpha_agents.tree_search.bridges.androidworld.task_outcomes import MissingAgentAnswerError, bounded_agent_failure
 
 
@@ -307,7 +307,7 @@ def test_output_modules_survive_core_snapshot_and_candidate_patches(tmp_path):
     assert (
         candidate.workspace / "artemis/agents/outputter/outputter.md"
     ).read_text() == "Original prompt"
-    from alpha_agents.tree_search.core.workspace import recover_patch
+    from alpha_agents.tree_search.core.dgm.workspace import recover_patch
 
     assert not recover_patch(candidate)
     (candidate.workspace / "artemis/config/output.py").write_text("VALUE = 2\n")

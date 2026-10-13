@@ -5,7 +5,7 @@ from pathlib import Path
 
 from alpha_agents.tree_search import DGMController, SearchConfig, ValidationReport
 from alpha_agents.tree_search.cli import build
-from alpha_agents.tree_search.core.storage import write_json
+from alpha_agents.tree_search.core.shared.storage import write_json
 from alpha_agents.tree_search.mutators.coding_agents.codex import backend, worker
 from alpha_agents.tree_search.mutators.coding_agents.codex.backend import CodexMutator
 from alpha_agents.tree_search.validators.changed_pytest import ChangedPytestValidator
@@ -50,7 +50,7 @@ def test_validation_failure_does_not_replace_benchmark_score(source, tmp_path):
 def test_context_is_written_once_and_consumed_by_command_backend(
     source, tmp_path, monkeypatch
 ):
-    from alpha_agents.tree_search.core import controller
+    from alpha_agents.tree_search.core.dgm import controller
 
     examples = Path(__file__).resolve().parents[1] / "examples"
     calls = []
@@ -87,7 +87,7 @@ def test_context_is_written_once_and_consumed_by_command_backend(
 def test_codex_backend_consumes_canonical_context_without_writing_patch(
     source, tmp_path, monkeypatch
 ):
-    from alpha_agents.tree_search.core.contracts import Candidate, MutationContext
+    from alpha_agents.tree_search.core.dgm.contracts import Candidate, MutationContext
 
     candidate = Candidate("child", "initial", tmp_path, "base")
     context = MutationContext("Improve", "Use evidence", {"parent": "initial"})
@@ -148,7 +148,7 @@ def test_codex_worker_main_only_executes_engineering_goal(tmp_path, monkeypatch)
 
 
 def test_changed_tests_validator_and_controller_capture_new_files(source, tmp_path):
-    from alpha_agents.tree_search.core.contracts import MutationOutcome
+    from alpha_agents.tree_search.core.dgm.contracts import MutationOutcome
 
     class AddTest(Increment):
         def mutate(self, candidate, context):

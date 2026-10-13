@@ -7,7 +7,7 @@ if sys.platform == "win32":
 
 import pytest
 from alpha_agents.tree_search.bridges.androidworld.bridge import AndroidWorldBridge
-from alpha_agents.tree_search.core.contracts import Candidate
+from alpha_agents.tree_search.core.dgm.contracts import Candidate
 
 
 @pytest.fixture

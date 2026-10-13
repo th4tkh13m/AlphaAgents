@@ -7,7 +7,7 @@ import queue
 from contextlib import contextmanager
 from pathlib import Path
 
-from ..core.contracts import Candidate, Evaluation, MutationContext
+from ..core.dgm.contracts import Candidate, Evaluation, MutationContext
 from ..infrastructure.commands import expand_command
 from ..infrastructure.process import execute
 

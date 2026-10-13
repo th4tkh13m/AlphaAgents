@@ -3,8 +3,8 @@
 import sys
 from pathlib import Path
 
-from ..core.contracts import ValidationReport
-from ..core.workspace import git
+from ..core.dgm.contracts import ValidationReport
+from ..core.dgm.workspace import git
 from ..infrastructure.process import execute
 
 

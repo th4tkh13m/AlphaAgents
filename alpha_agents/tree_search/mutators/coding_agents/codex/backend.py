@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from ....core.contracts import MutationOutcome
+from ....core.dgm.contracts import MutationOutcome
 from ....infrastructure.process import execute
 
 
