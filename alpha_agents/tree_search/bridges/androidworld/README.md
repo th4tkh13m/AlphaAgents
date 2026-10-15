@@ -141,3 +141,38 @@ AndroidWorld's public answer action before grading. The episode records
 `agent_answer` and `answer_submitted`. Missing output or a failed handoff invalidates
 the runtime; an incorrect submitted answer remains a measured task failure. The
 bridge never derives an answer from benchmark success criteria.
+
+### Emulator pool with private netsim instances
+
+For new runs, the operational launcher can create fresh copies of a stopped,
+app-provisioned AVD and supervise one private netsim daemon per emulator:
+
+```bash
+python -m alpha_agents.tree_search.bridges.androidworld.emulator_pool \
+  --sdk "$PWD/eval/android-sdk" \
+  --adb /path/to/platform-tools/adb \
+  --source-avd /path/to/stopped/provisioned.avd \
+  --output "$PWD/runs/device-resets/new-private-pool" \
+  --count 6
+```
+
+Use the AndroidWorld Python environment, which supplies `grpcio`. The output
+directory must be fresh and the selected ports must be free. Defaults retain
+emulator console ports 5580–5590 and control-gRPC ports 8580–8590; netsim uses
+19001–19006 with HCI ports 19101–19106. Each daemon gets its own discovery
+directory and instance number. Each emulator receives an explicit
+`-packet-streamer-endpoint`. The SDK's Wi-Fi backend, Bluetooth emulation and
+installed netsim binary remain unchanged. This isolates the shared quota; it
+does not increase that quota or repair native transport-error handling.
+
+The supervisor remains running after sequential boot and app-inventory checks.
+`status.json` records daemon/emulator PID and birth identities, commands, ports,
+readiness and failures. A failed daemon stops only its paired emulator; the
+launcher does not silently restart either process. Send SIGTERM to the recorded
+supervisor to shut down its owned pool. `--ready-seconds 60` provides a bounded
+smoke run instead. There is no resume/adopt mode for an old output directory.
+
+The launcher does not stop an existing experiment or its emulators, launch a
+search, or certify task compatibility. Confirm the old run is stopped before
+replacing its pool. Run fixture/canonical validation and record a fresh
+infrastructure baseline before comparing scores across deployments.
