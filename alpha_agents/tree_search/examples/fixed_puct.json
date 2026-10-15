@@ -5,6 +5,7 @@
     "discount_factor": 0.9,
     "max_trials": 30,
     "trial_workers": 2,
+    "implementor_limit": 9,
     "codex_invocation_cap": 2000,
     "shortlist_limit": 3
   },

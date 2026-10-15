@@ -49,6 +49,7 @@ class FixedPUCTConfig:
     max_implementations: int = 3
     trial_workers: int = 2
     device_limit: int = 6
+    implementor_limit: int = 9
     # Historical storage names; execution uses the generic accessors below.
     codex_invocation_cap: int = 2000
     codex_run_timeout_seconds: int = 7200
@@ -78,7 +79,7 @@ class FixedPUCTConfig:
         for name in (
             "max_depth", "max_trials", "max_new_attempts_per_trial", "max_attempts",
             "max_plans", "max_implementations", "trial_workers", "device_limit",
-            "codex_invocation_cap", "shortlist_limit",
+            "codex_invocation_cap", "shortlist_limit", "implementor_limit",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -86,7 +87,7 @@ class FixedPUCTConfig:
         ceilings = {
             "max_depth": 8, "max_trials": 30, "max_new_attempts_per_trial": 3,
             "max_attempts": 90, "max_plans": 3, "max_implementations": 3,
-            "trial_workers": 2, "device_limit": 6, "shortlist_limit": 3,
+            "trial_workers": 9, "device_limit": 9, "shortlist_limit": 3, "implementor_limit": 9,
         }
         for name, ceiling in ceilings.items():
             if getattr(self, name) > ceiling:

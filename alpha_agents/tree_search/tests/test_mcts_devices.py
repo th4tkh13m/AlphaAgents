@@ -62,15 +62,16 @@ def test_two_queued_trials_each_get_three_devices_then_release_every_lease():
     assert sum(h["event"] == "release" for h in scheduler.history) == 6
 
 
-def test_single_trial_borrows_all_six_and_closed_queue_drains_admitted_work():
-    scheduler = DeviceScheduler(tuple(f"d{i}" for i in range(6)), autostart=False)
-    started = threading.Barrier(7)
+@pytest.mark.parametrize("device_count", [6, 9])
+def test_single_trial_borrows_all_devices_and_closed_queue_drains_admitted_work(device_count):
+    scheduler = DeviceScheduler(tuple(f"d{i}" for i in range(device_count)), autostart=False)
+    started = threading.Barrier(device_count + 1)
     finish = threading.Event()
     def run(device):
         started.wait(timeout=5)
         assert finish.wait(5)
         return device
-    futures = [scheduler.submit(job(str(i), "a", run=run)) for i in range(6)]
+    futures = [scheduler.submit(job(str(i), "a", run=run)) for i in range(device_count)]
     scheduler.start()
     started.wait(timeout=5)
     scheduler.close(wait=False)
@@ -319,6 +320,27 @@ def staged_adapter(cache, tmp_path, request):
     scheduler.close()
 
 
+def test_accessibility_failure_quarantines_even_when_adb_health_passes(staged_adapter):
+    adapter, artifact, workspace, calls, failures = staged_adapter
+    adapter.prepare(artifact, {"screen": ("ScreenA",)})
+    original = adapter.runner
+
+    def inaccessible(*args, **kwargs):
+        summary = original(*args, **kwargs)
+        summary["status"] = "invalid_runtime"
+        summary["task_results"][0]["exception"] = "RuntimeError: Could not get a11y tree."
+        return summary
+
+    adapter.runner = inaccessible
+    with pytest.raises(UnhealthyDevice, match="Could not get a11y tree"):
+        adapter._attempt(adapter._identity(artifact, "ScreenA"), "screen", "emulator-5554")
+    with adapter.cache.store() as store:
+        row = store.db.execute("SELECT state,payload FROM task_runs").fetchone()
+        assert row["state"] == "infra_failed"
+        assert json.loads(row["payload"])["unhealthy"] is True
+        assert store.db.execute("SELECT count(*) FROM evaluation_snapshots").fetchone()[0] == 0
+
+
 def test_staged_adapter_pairs_s0_and_selection_and_only_runs_missing_complement(staged_adapter):
     adapter, artifact, workspace, calls, failures = staged_adapter
     adapter.prepare(artifact, {"screen": ("ScreenA",), "s0": ("TaskA", "TaskB")})
@@ -545,6 +567,51 @@ def test_simultaneous_stages_share_one_compatible_task_execution(staged_adapter)
         assert store.db.execute("SELECT count(*) FROM task_runs").fetchone()[0] == 3
 
 
+def test_failed_task_retries_before_earlier_slow_task_finishes(staged_adapter):
+    adapter, artifact, workspace, calls, failures = staged_adapter
+    failures["TaskB"] = 1
+    first_started, release_first, retried = threading.Event(), threading.Event(), threading.Event()
+    original = adapter.runner
+    attempts = []
+
+    def runner(*args, **kwargs):
+        task = kwargs["tasks"][0]
+        if task == "TaskA":
+            first_started.set()
+            assert release_first.wait(5)
+        else:
+            attempts.append(task)
+            if len(attempts) == 2:
+                retried.set()
+        return original(*args, **kwargs)
+
+    adapter.runner = runner
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(adapter.evaluate, artifact, workspace, "s0", ("TaskA", "TaskB"))
+        try:
+            assert first_started.wait(5)
+            assert retried.wait(5)
+            assert not result.done()
+        finally:
+            release_first.set()
+        evidence = result.result(5)
+    assert list(evidence.outcomes) == ["TaskA", "TaskB"]
+    assert evidence.outcomes == {"TaskA": False, "TaskB": True}
+    assert len(calls) == 3
+
+
+def test_implementation_session_serializes_checks_and_releases_before_canonical_work(staged_adapter):
+    adapter, artifact, workspace, calls, failures = staged_adapter
+    with adapter.implementation_session("invocation") as testing:
+        evidence = testing.evaluate(artifact, workspace, "targeted", ("TaskA", "TaskB"))
+        assert len({device for _, _, device in calls}) == 1
+        assert evidence.outcomes == {"TaskA": False, "TaskB": True}
+        assert "invocation" in adapter.scheduling_status()["testing_reservations"]
+    assert adapter.scheduling_status()["testing_reservations"] == {}
+    adapter.evaluate(artifact, workspace, "s0", ("TaskA", "TaskB"))
+    assert len(calls) == 4  # Targeted outcomes never substitute for canonical ones.
+
+
 def test_search_dependency_promotes_queued_background_task_before_other_promotions():
     scheduler = DeviceScheduler(("d0",), autostart=False)
     scheduler.submit(job("needed", "promotion", 1, "selection"))
@@ -768,10 +835,11 @@ def test_quarantine_completes_queued_futures_outside_scheduler_lock():
     assert observations == [True]
 
 
-def test_dispatch_recovery_preserves_unknown_duration_after_verified_process_death(cache, tmp_path):
+@pytest.mark.parametrize("pool_size", [2, 9])
+def test_dispatch_recovery_preserves_unknown_duration_after_verified_process_death(cache, tmp_path, pool_size):
     ident = identity()
     cache.register("owner", ident.artifact_id, "s0", (ident,))
-    cache.register_dispatch("dispatch", ident.key, "old-session", 2, "owner", "s0")
+    cache.register_dispatch("dispatch", ident.key, "old-session", pool_size, "owner", "s0")
     cache.start_dispatch("dispatch", "device", .2)
     cache.begin(ident, "device", tmp_path / "interrupted")
     with pytest.raises(TaskIncomplete, match="may still be live"):

@@ -44,6 +44,9 @@ class FixedPUCTCoordinator:
     def close(self):
         self.store.close()
 
+    def _status(self):
+        return {**self.store.status(), "device_pool": self.evaluator.scheduling_status()}
+
     def request_stop(self):
         """Stop new admission; already admitted bounded work still drains."""
         self.stop.set()
@@ -239,7 +242,7 @@ class FixedPUCTCoordinator:
                     if promoted:
                         promoting[promotions.submit(self._promotion, promoted)] = promoted
                 while True:
-                    while len(active) < self.config.trial_workers and pending:
+                    while len(active) < self.config.trial_workers and pending and not self.stop.is_set():
                         trial = pending.pop(0)
                         active[trials.submit(self._trial, trial, True)] = trial
                     while len(active) < self.config.trial_workers and not pending and not self.stop.is_set():
@@ -265,10 +268,14 @@ class FixedPUCTCoordinator:
                         trial = active.pop(future)
                         try:
                             future.result()
+                        except AssessmentPending as failure:
+                            # Durable trial-local recovery is not a reason to
+                            # truncate peers or close admission for replacements.
+                            errors.append({"trial": trial, "error": str(failure), "scope": "trial"})
                         except Exception as failure:
-                            errors.append({"trial": trial, "error": str(failure)})
+                            errors.append({"trial": trial, "error": str(failure), "scope": "global"})
                             self.stop.set()
-                    write_json(self.directory / "status.json", self.store.status())
+                    write_json(self.directory / "status.json", self._status())
                 # A score can arrive between the previous queue drain and a
                 # trial's final completion; do not lose its promotion eligibility.
                 while not self.scored.empty():
@@ -287,7 +294,7 @@ class FixedPUCTCoordinator:
             if finalize and not pending_count and not self.stop.is_set():
                 result["final_selection"] = self.finalize(locked=True)
                 result["selection_status"] = result["final_selection"]["selection_status"]
-            result["status"] = self.store.status()
+            result["status"] = self._status()
             write_json(self.directory / "status.json", result["status"])
             write_json(self.directory / "run_result.json", result)
             return result

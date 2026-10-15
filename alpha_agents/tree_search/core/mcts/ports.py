@@ -8,6 +8,7 @@ and reconciliation instead of accepting these no-op defaults.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -115,6 +116,9 @@ class StagedEvaluator(Protocol):
     telemetry_name: str
     supports_checks: bool
 
+    def implementation_session(self, owner: str): ...
+    def scheduling_status(self) -> dict[str, Any]: ...
+
     def preflight(self, source: Path) -> dict[str, Any]: ...
     def for_owner(self, owner: str) -> StagedEvaluator: ...
     def prepare(self, artifact: str, stages: Mapping[str, tuple[str, ...]]) -> None: ...
@@ -135,6 +139,14 @@ reconcile their own processes and task state.
 
     telemetry_name = "evaluation"
     supports_checks = False
+
+    def scheduling_status(self) -> dict[str, Any]:
+        return {}
+
+    @contextmanager
+    def implementation_session(self, owner: str):
+        """Adapters without physical devices require no testing admission."""
+        yield self
 
     def preflight(self, source: Path) -> dict[str, Any]:
         return {}

@@ -23,7 +23,7 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "alpha_agents.tree_search.core.dgm" = ["README.md"]
-"alpha_agents.tree_search.core.mcts" = ["README.md"]
+"alpha_agents.tree_search.core.mcts" = ["README.md", "ASYNC_SCHEDULING.md"]
 "alpha_agents.tree_search.mutators.coding_agents.codex.roles" = ["prompts/*.md", "prompts/*.json"]
 "alpha_agents.tree_search" = ["LICENSE", "mutators/coding_agents/codex/*.md", "bridges/androidworld/*.json", "bridges/androidworld/*.md", "examples/*.json", "examples/*.py", "examples/toy_harness/*.py"]
 

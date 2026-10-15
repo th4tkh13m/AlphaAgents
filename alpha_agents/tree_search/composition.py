@@ -43,9 +43,10 @@ class SearchApplication:
     Drain external work before closing the coordinator's state store.
     """
 
-    def __init__(self, coordinator, scheduler):
+    def __init__(self, coordinator, scheduler, profiler=None):
         self.coordinator = coordinator
         self.scheduler = scheduler
+        self.profiler = profiler
         self._closed = False
 
     @property
@@ -56,12 +57,18 @@ class SearchApplication:
         return self.coordinator.request_stop()
 
     def preflight(self):
+        if self.profiler is not None:
+            self.profiler.start()
         return self.coordinator.preflight()
 
     def run(self, **kwargs):
+        if self.profiler is not None:
+            self.profiler.start()
         return self.coordinator.run(**kwargs)
 
     def finalize(self):
+        if self.profiler is not None:
+            self.profiler.start()
         return self.coordinator.finalize()
 
     def close(self):
@@ -71,7 +78,11 @@ class SearchApplication:
         try:
             self.scheduler.close()
         finally:
-            self.coordinator.close()
+            try:
+                if self.profiler is not None:
+                    self.profiler.close()
+            finally:
+                self.coordinator.close()
 
     def __enter__(self):
         if self._closed:
@@ -116,7 +127,8 @@ def trusted_runner_revision(androidworld_revision, source_attestation=None):
     root = Path(artemis.__file__).parent
     adapters = {"evaluator.py": staged_evaluator, "task_cache.py": task_cache, "runtime_attestation.py": runtime_attestation}
     files = ("artemis.py", "artemis_runner.py", "runtime_limits.py", "device_preflight.py", "fixture_preflight.py",
-             "task_outcomes.py", "answer_handoff.py", "phase_watch.py", "model_health.py", "memory_compat.py")
+             "task_outcomes.py", "answer_handoff.py", "phase_watch.py", "model_health.py", "memory_compat.py",
+             "device_recovery.py", "device_maintenance.py")
     return fingerprint({"androidworld_revision": androidworld_revision,
                         "androidworld_source": source_attestation,
                         "staged_adapter": {name: hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
@@ -163,10 +175,16 @@ def build(config, output):
     devices = tuple(harness.pop("androidworld_devices"))
     if len(devices) > search.device_limit:
         raise ValueError("Configured device pool exceeds the frozen controller limit")
-    scheduler = DeviceScheduler(devices, autostart=False)
+    from alpha_agents.tree_search.bridges.androidworld.device_maintenance import (
+        DeviceMaintenance,
+    )
+    maintenance = DeviceMaintenance(output, harness, devices)
+    scheduler = DeviceScheduler(devices, autostart=False, implementor_limit=search.implementor_limit,
+                                recover_device=maintenance)
     coordinator = None
     try:
         cache = TaskCache(output, search, objective)
+        maintenance.cache = cache
         artifacts = ArtifactStore(output / "artifacts")
         evaluator = StagedArtemisEvaluator(cache, artifacts, scheduler, harness, revision,
             {"screen": tuple(subset["screen"]), "selection": tuple(subset["selection"]),
@@ -176,7 +194,9 @@ def build(config, output):
             subset["selection"], subset, {"codex": runtime.record, "android": harness, "revision": asdict(revision),
                                          "devices": devices, "androidworld_revision": evaluation["androidworld_revision"]})
         scheduler.start()
-        return SearchApplication(coordinator, scheduler)
+        from alpha_agents.tree_search.infrastructure.perfetto import TraceWatcher
+
+        return SearchApplication(coordinator, scheduler, TraceWatcher(output, devices=devices))
     except BaseException:
         try:
             scheduler.close()

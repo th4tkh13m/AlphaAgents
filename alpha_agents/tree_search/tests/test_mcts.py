@@ -8,6 +8,7 @@ import math
 import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from threading import Barrier
@@ -165,7 +166,7 @@ def child_transition(store, trial, selection, id="child", u=.7, j=.8):
 @pytest.mark.parametrize("kwargs", [
     {"screen_gate": "guess"}, {"max_trials": 31}, {"max_depth": True},
     {"c_puct": float("nan")}, {"prior_floor": 0}, {"codex_run_timeout_seconds": 600},
-    {"trial_workers": 3}, {"device_limit": 7}, {"max_plans": 2}, {"max_implementations": 2},
+    {"trial_workers": 10}, {"device_limit": 10}, {"max_plans": 2}, {"max_implementations": 2},
     {"discount_factor": 0}, {"discount_factor": 1}, {"discount_factor": True},
     {"discount_factor": -.1}, {"discount_factor": float("nan")}, {"discount_factor": float("inf")},
 ])
@@ -173,6 +174,13 @@ def test_config_rejects_invalid_and_out_of_protocol_defaults(kwargs):
     args = {"screen_gate": "execution_valid", **kwargs}
     with pytest.raises(ValueError):
         FixedPUCTConfig(**args)
+
+
+def test_nine_worker_experiment_preserves_branching_and_role_deadlines():
+    config = FixedPUCTConfig(screen_gate="execution_valid", trial_workers=9, device_limit=9)
+    assert config.trial_workers == config.device_limit == 9
+    assert config.max_plans == config.max_implementations == 3
+    assert config.role_timeout_seconds == 7200
 
 
 @pytest.mark.parametrize("bad", [True, float("nan"), float("inf"), -.1, 1.1])
@@ -439,8 +447,8 @@ def test_missing_or_forged_value_cannot_be_zero_substitute(store):
     with pytest.raises(ValueError, match="unchanged persisted"):
         store.persist_value(trial, 0, forged, {"reason": "pretend exhaustion"})
     store.awaiting(trial, "value")
-    with pytest.raises(CapacityError):
-        store.reserve_trial()
+    replacement = store.reserve_trial()
+    assert replacement != trial
     assert store.db.execute("SELECT count(*) FROM backups").fetchone()[0] == 0
 
 
@@ -495,14 +503,45 @@ def test_no_plan_absorbing_stop_is_terminal_not_budget_cutoff(store):
     store.backup(trial)
 
 
-def test_two_workers_cannot_reserve_same_branch(store):
+def test_workers_reserve_distinct_slots_under_same_plan(store):
     expand(store)
     first, second = store.reserve_trial(), store.reserve_trial()
     s1 = store.select_and_reserve(first)
-    assert store.select_and_reserve(second)["kind"] == "wait"
+    s2 = store.select_and_reserve(second)
+    assert s2["kind"] == "implement"
+    assert s1["plan"] == s2["plan"]
+    assert s1["attempt"] != s2["attempt"]
+    assert store._row("attempts", s1["attempt"])["slot"] == 1
+    assert store._row("attempts", s2["attempt"])["slot"] == 2
     store.fail_attempt(s1["attempt"], "invalid")
     store.backup(first)
-    assert store.select_and_reserve(second)["kind"] == "implement"
+    with pytest.raises(ValueError, match="unfinished selection"):
+        store.select_and_reserve(second)
+
+
+def test_nine_workers_atomically_fill_three_slots_per_plan(tmp_path):
+    config = FixedPUCTConfig(screen_gate="execution_valid", trial_workers=9, device_limit=9)
+    directory = tmp_path / "run"
+    with closing(TreeStore(directory, config, OBJECTIVE)) as store:
+        store.add_root("root", score("root-artifact"))
+        expand(store, drafts=[draft(f"plan-{i}", mechanism=f"mechanism-{i}") for i in range(3)])
+        trials = [store.reserve_trial() for _ in range(9)]
+        ready = Barrier(9)
+
+        def select(trial):
+            with closing(TreeStore(directory, config, OBJECTIVE)) as worker:
+                ready.wait(5)
+                return worker.select_and_reserve(trial)
+
+        with ThreadPoolExecutor(max_workers=9) as pool:
+            selections = list(pool.map(select, trials))
+        assert all(s["kind"] == "implement" for s in selections)
+        assert len({s["attempt"] for s in selections}) == 9
+        for plan in store.db.execute("SELECT id FROM plans"):
+            assert [a[0] for a in store.db.execute("SELECT slot FROM attempts WHERE plan=? ORDER BY slot", (plan[0],))] == [1, 2, 3]
+        assert store.db.execute("SELECT sum(n) FROM plans").fetchone()[0] == 0
+        assert store.db.execute("SELECT sum(w) FROM plans").fetchone()[0] == 0
+        assert store.db.execute("SELECT count(*) FROM backups").fetchone()[0] == 0
 
 
 def test_thirty_trials_never_become_thirty_one(store):
@@ -515,11 +554,13 @@ def test_thirty_trials_never_become_thirty_one(store):
     assert store.db.execute("SELECT count(*) FROM trials").fetchone()[0] == 30
 
 
-def test_concurrent_trial_admission_atomic(tmp_path):
-    config = FixedPUCTConfig(screen_gate="execution_valid", codex_invocation_cap=4)
+@pytest.mark.parametrize("worker_count", [2, 9])
+def test_concurrent_trial_admission_atomic(tmp_path, worker_count):
+    config = FixedPUCTConfig(screen_gate="execution_valid", trial_workers=worker_count,
+                             codex_invocation_cap=worker_count * 2)
     s = TreeStore(tmp_path, config, OBJECTIVE)
     s.add_root("root", score("a"))
-    barrier = Barrier(3)
+    barrier = Barrier(worker_count + 1)
     def admit(_):
         worker = TreeStore(tmp_path, config, OBJECTIVE)
         barrier.wait()
@@ -529,10 +570,10 @@ def test_concurrent_trial_admission_atomic(tmp_path):
             return None
         finally:
             worker.close()
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        admitted = list(pool.map(admit, range(3)))
-    assert sum(id is not None for id in admitted) == 2
-    assert s.budget()["reserved"] == 4
+    with ThreadPoolExecutor(max_workers=worker_count + 1) as pool:
+        admitted = list(pool.map(admit, range(worker_count + 1)))
+    assert sum(id is not None for id in admitted) == worker_count
+    assert s.budget()["reserved"] == worker_count * 2
     assert s.budget()["available"] == 0
     s.close()
 
@@ -1296,8 +1337,13 @@ def test_final_judge_outage_keeps_android_evidence_and_never_fabricates_j(engine
     assert store.db.execute("SELECT count(*) FROM evaluation_snapshots").fetchone()[0] == 2
     assert store.db.execute("SELECT score FROM nodes WHERE parent IS NOT NULL").fetchone()[0] is None
     assert store.status()["backups"] == 0
-    with pytest.raises(CapacityError):
-        store.reserve_trial()
+    # Recovery retains its funding, but frees the worker for another trial.
+    reserved = store.budget()["reserved"]
+    replacement = store.reserve_trial()
+    assert store.budget()["reserved"] == reserved + 2
+    assert not executor.stop_admission.is_set()
+    store.stop_trial(replacement, "test_cleanup")
+    store.backup(replacement)
     store.close()
 
 
@@ -2125,3 +2171,70 @@ def test_incomplete_three_plan_proposal_keeps_expansion_open(engine_factory, cou
     assert not store.capacity('root')['terminal']
     assert store.budget()['reserved'] == 0
     store.close()
+
+
+def test_parked_attempts_do_not_cause_indefinite_selection_wait_or_slot_reuse(store):
+    expand(store)
+    attempts = []
+    for _ in range(3):
+        trial = store.reserve_trial()
+        selected = store.select_and_reserve(trial)
+        assert selected["kind"] == "implement"
+        attempts.append(selected["attempt"])
+        store.register_child(selected["attempt"], f"pending-{trial}", f"artifact-{trial}")
+        store.awaiting(trial, "evaluation")
+    funding = store.budget()["reserved"]
+    peer = store.reserve_trial()
+    selected = store.select_and_reserve(peer)
+    assert selected["kind"] == "cutoff" and selected["reason"] == "pending_recovery"
+    assert not selected["capacity"]["exhausted"]  # an outage is not a terminal value of zero
+    assert selected["capacity"]["pending"]
+    assert store.db.execute("SELECT count(*) FROM attempts").fetchone()[0] == 3
+    assert store.budget()["reserved"] == funding + 2
+    assert all(store.db.execute("SELECT 1 FROM reservations WHERE owner=? AND remaining>0", (aid,)).fetchone()
+               for aid in attempts)
+    assert store.db.execute("SELECT count(*) FROM backups").fetchone()[0] == 0
+
+
+def test_value_storage_failure_is_fatal_instead_of_local_model_outage(engine_factory, monkeypatch):
+    store, executor, _, _ = engine_factory()
+    def corrupted(*args, **kwargs):
+        raise sqlite3.DatabaseError("Shared state is corrupt")
+    monkeypatch.setattr(store, "persist_value", corrupted)
+    try:
+        trial = store.reserve_trial()
+        with pytest.raises(sqlite3.DatabaseError, match="Shared state"):
+            executor.run(trial)
+        assert store.status()["backups"] == 0
+        assert store._row("trials", trial)["state"] == "active"
+    finally:
+        store.close()
+
+
+def test_local_evaluation_recovery_reuses_screen_and_implementation(engine_factory):
+    from alpha_agents.tree_search.core.mcts.controller import EvaluationPending
+
+    store, executor, gateway, evaluator = engine_factory()
+    evaluate = evaluator.evaluate
+    def unavailable(artifact, workspace, stage, tasks):
+        if stage == "s0":
+            raise TimeoutError("S0 infrastructure unavailable")
+        return evaluate(artifact, workspace, stage, tasks)
+    evaluator.evaluate = unavailable
+    try:
+        trial = store.reserve_trial()
+        with pytest.raises(EvaluationPending):
+            executor.run(trial)
+        assert store._row("trials", trial)["state"] == "awaiting_evaluation"
+        assert not executor.stop_admission.is_set()
+        assert store.status()["backups"] == 0
+        evaluator.evaluate = evaluate
+        executor.recover(trial)
+        assert gateway.calls.count("implementer") == 1
+        assert evaluator.calls == ["screen", "s0"]
+        assert store.status()["backups"] == 1
+        assert executor.run(trial) == store.backup(trial)
+        assert store.status()["backups"] == 1
+        assert store.budget()["reserved"] == 0
+    finally:
+        store.close()

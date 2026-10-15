@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from alpha_agents.tree_search.core.mcts.coordinator import FixedPUCTCoordinator
 from alpha_agents.tree_search.core.mcts.finalization import Finalizer, shortlist
 from alpha_agents.tree_search.core.mcts.ports import EvaluationAdapter, RoleAdapter
 from alpha_agents.tree_search.core.mcts.recovery import reconcile_process
+from alpha_agents.tree_search.core.mcts.storage import TreeStore
 from alpha_agents.tree_search.infrastructure.process import process_birth
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import (
     RoleRequest,
@@ -93,6 +95,80 @@ def coordinator(tmp_path):
         ("a", "b", "c", "d"), subset)
     yield search
     search.close()
+
+
+def test_next_implementor_tests_while_previous_child_is_being_evaluated(coordinator):
+    from alpha_agents.tree_search.bridges.androidworld.scheduler import (
+        DeviceScheduler,
+        TaskJob,
+    )
+
+    pool = DeviceScheduler(tuple(f"d{i}" for i in range(9)), implementor_limit=1)
+    screen_started, release_screen = threading.Event(), threading.Event()
+    overlap = []
+
+    class PooledEvaluator(EvaluationAdapter):
+        supports_checks = True
+
+        def __init__(self, testing_owner=None):
+            self.testing_owner = testing_owner
+
+        @contextmanager
+        def implementation_session(self, owner):
+            with pool.implementation(owner):
+                yield PooledEvaluator(owner)
+
+        def scheduling_status(self):
+            return pool.status()
+
+        def evaluate(self, artifact, workspace, stage, tasks):
+            value = int((workspace / "controller.py").read_text().split("=")[1])
+
+            def execute(device):
+                if value == 1 and stage == "screen":
+                    screen_started.set()
+                    assert release_screen.wait(5)
+                if value == 2 and stage == "targeted":
+                    overlap.append(pool.status())
+                    release_screen.set()
+                return True
+
+            futures = [pool.submit(TaskJob(f"{artifact}-{stage}-{task}", artifact, stage, 1,
+                                          execute, self.testing_owner if stage == "targeted" else None))
+                       for task in tasks]
+            for future in futures:
+                future.result(5)
+            return StageEvidence(artifact, stage, {task: stage == "screen" or i < value
+                                 for i, task in enumerate(tasks)}, (f"trace:{artifact}",))
+
+    class CheckingGateway(Gateway):
+        supports_checks = True
+
+        def invoke_with_checks(self, request, workspace, service):
+            result = self.invoke(request, workspace)
+            if self.implementations == 2:
+                assert screen_started.wait(5)
+            observed = service.handle({"check_id": "mechanism", "attempt_id": request.context["attempt_id"],
+                                       "tasks": ["a"], "mechanism": "bounded recovery",
+                                       "expected_observation": "recovery evidence"})
+            assert observed["status"] == "completed"
+            result["check_requests"] = [{k: observed.get(k) for k in
+                                       ("check_id", "status", "artifact_id", "snapshot_id", "outcomes")}]
+            service.validate_handoff(result)
+            return result
+
+    coordinator.evaluator, coordinator.gateway = PooledEvaluator(), CheckingGateway()
+    try:
+        result = coordinator.run(stop_after_trials=2)
+        assert result["errors"] == []
+        assert result["status"]["backups"] == 2
+        assert overlap and overlap[0]["active_device_count"] >= 2
+        assert len(overlap[0]["testing_reservations"]) == 1
+        assert result["status"]["device_pool"]["testing_reservations"] == {}
+        assert len(list(coordinator.directory.glob("role_requests/*/device_admission.json"))) == 2
+    finally:
+        release_screen.set()
+        pool.close()
 
 
 def test_two_workers_initialize_real_root_then_drain_exact_stop_count(coordinator):
@@ -454,7 +530,8 @@ def test_final_report_exposes_per_node_task_weights_and_judge_components(coordin
     assert "Predicted continuation contributions remain separate" in markdown
 
 
-def test_full_30_trial_software_protocol_with_three_concurrent_plan_branches(tmp_path):
+@pytest.mark.parametrize("worker_count", [2, 9])
+def test_full_30_trial_software_protocol_with_three_concurrent_plan_branches(tmp_path, worker_count):
     class DiverseGateway(Gateway):
         def invoke(self, request, workspace):
             result = super().invoke(request, workspace)
@@ -472,7 +549,7 @@ def test_full_30_trial_software_protocol_with_three_concurrent_plan_branches(tmp
     tasks = tuple(f"Task{i:02}" for i in range(20))
     s0 = tasks[:10]
     subset = {"tasks": [{"task": task, "weight": {"display": .1}} for task in s0], "coverage": {"fixture": "software-only"}}
-    search = FixedPUCTCoordinator(source, tmp_path / "run", FixedPUCTConfig(screen_gate="execution_valid"),
+    search = FixedPUCTCoordinator(source, tmp_path / "run", FixedPUCTConfig(screen_gate="execution_valid", trial_workers=worker_count),
         Objective("software-subset", "rubric", "judge"), gateway, evaluator, RoleSettings("configured-model", "high"),
         tuple(f"Screen{i}" for i in range(5)), {task: .1 for task in s0}, tasks, subset)
     try:
@@ -606,5 +683,148 @@ raise AssertionError("Crash boundary was not reached")
         assert store.budget()["spent"] == invocations and gateway.calls == []
         assert [tuple(row) for row in store.db.execute("SELECT id,n,w FROM plans ORDER BY id")] == plan_statistics
         assert [tuple(row) for row in store.db.execute("SELECT id,n,w FROM attempts ORDER BY id")] == attempt_statistics
+    finally:
+        search.close()
+
+
+def isolation_search(tmp_path, config, gateway=None, evaluator=None):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "controller.py").write_text("value = 0\n")
+    subset = {"tasks": [{"task": task, "weight": {"display": .5}} for task in ("a", "b")],
+              "coverage": {"test": True}}
+    return FixedPUCTCoordinator(source, tmp_path / "run", config, Objective("subset", "rubric", "judge"),
+        gateway or Gateway(), evaluator or Evaluator(), RoleSettings("configured-model", "high"),
+        ("screen",), {"a": .5, "b": .5}, ("a", "b", "c", "d"), subset)
+
+
+@pytest.mark.parametrize("outage", ["evaluation", "judge"])
+def test_parked_trial_allows_peer_depth_and_replacement_admission(tmp_path, monkeypatch, outage):
+    """Hold a peer until a replacement starts: proves actual concurrent progress."""
+    parked, replacement = threading.Event(), threading.Event()
+    bad_artifact = []
+    held = []
+    lock = threading.Lock()
+    original_awaiting = TreeStore.awaiting
+
+    def record_park(store, trial, kind):
+        original_awaiting(store, trial, kind)
+        if kind == outage:
+            parked.set()
+
+    monkeypatch.setattr(TreeStore, "awaiting", record_park)
+
+    class OutageEvaluator(Evaluator):
+        def evaluate(self, artifact, workspace, stage, tasks):
+            value = int((workspace / "controller.py").read_text().split("=")[1])
+            if stage == "screen" and value == 1:
+                bad_artifact.append(artifact)
+                if outage == "evaluation":
+                    raise RuntimeError("Device unavailable")
+            hold = False
+            with lock:
+                if stage == "screen" and value > 1 and not held:
+                    held.append(artifact)
+                    hold = True
+            if hold:
+                assert parked.wait(10), "The failed trial must park independently"
+                assert replacement.wait(10), "A replacement must start while this peer is active"
+            return super().evaluate(artifact, workspace, stage, tasks)
+
+    class OutageGateway(Gateway):
+        def invoke(self, req, workspace):
+            if req.role == "judge_execution" and req.artifact_id in bad_artifact and outage == "judge":
+                raise TimeoutError("Judge unavailable")
+            result = super().invoke(req, workspace)
+            if req.role == "implementer" and self.implementations >= 3:
+                replacement.set()
+            return result
+
+    config = FixedPUCTConfig(screen_gate="execution_valid", max_trials=3, trial_workers=2,
+                             max_new_attempts_per_trial=2)
+    search = isolation_search(tmp_path, config, OutageGateway(), OutageEvaluator())
+    monkeypatch.setattr(search, "_offer_promotion", lambda node: None)
+    try:
+        result = search.run(finalize=False)
+        assert parked.is_set() and replacement.is_set()
+        assert not search.stop.is_set()
+        assert [error["scope"] for error in result["errors"]] == ["trial"]
+        assert search.store.status()["trials"] == {f"awaiting_{outage}": 1, "completed": 2}
+        assert search.store.db.execute("SELECT max(depth) FROM nodes WHERE eligible=1").fetchone()[0] >= 2
+        assert search.store.status()["backups"] == 2
+        assert search.store.db.execute("SELECT count(*) FROM path p JOIN trials t ON t.id=p.trial "
+                                       "WHERE t.state='completed'").fetchone()[0] >= 4
+        assert search.store.budget()["reserved"] > 0  # parked completion funding retained
+    finally:
+        search.close()
+
+
+def test_value_outage_does_not_stop_replacements_or_fabricate_backup(tmp_path, monkeypatch):
+    class OutageGateway(Gateway):
+        failed_owner = None
+        def invoke(self, req, workspace):
+            if req.role == "value":
+                if self.failed_owner is None:
+                    self.failed_owner = req.artifact_id
+                if req.artifact_id == self.failed_owner:
+                    raise TimeoutError("Value endpoint unavailable")
+            return super().invoke(req, workspace)
+
+    config = FixedPUCTConfig(screen_gate="execution_valid", max_trials=3, trial_workers=1,
+                             max_new_attempts_per_trial=1)
+    search = isolation_search(tmp_path, config, OutageGateway())
+    monkeypatch.setattr(search, "_offer_promotion", lambda node: None)
+    try:
+        result = search.run(finalize=False)
+        assert not search.stop.is_set()
+        assert search.store.status()["trials"] == {"awaiting_value": 1, "completed": 2}
+        assert search.store.status()["backups"] == 2
+        assert len(result["errors"]) == 1 and result["errors"][0]["scope"] == "trial"
+        pending = search.store.db.execute("SELECT id FROM trials WHERE state='awaiting_value'").fetchone()[0]
+        assert not search.store.db.execute("SELECT 1 FROM backups WHERE trial=?", (pending,)).fetchone()
+        assert search.store.db.execute("SELECT count(*) FROM path WHERE trial=?", (pending,)).fetchone()[0] == 1
+    finally:
+        search.close()
+
+
+def test_unexpected_worker_failure_still_closes_global_admission(tmp_path, monkeypatch):
+    config = FixedPUCTConfig(screen_gate="execution_valid", max_trials=3, trial_workers=1)
+    search = isolation_search(tmp_path, config)
+    def broken(trial, recovering):
+        raise ValueError("Shared artifact integrity mismatch")
+    monkeypatch.setattr(search, "_trial", broken)
+    try:
+        result = search.run(finalize=False)
+        assert search.stop.is_set()
+        assert search.store.db.execute("SELECT count(*) FROM trials").fetchone()[0] == 1
+        assert result["errors"][0]["scope"] == "global"
+    finally:
+        search.close()
+
+
+@pytest.mark.parametrize("role", ["proposer", "policy"])
+def test_node_operation_outage_cuts_off_only_affected_rollout(tmp_path, monkeypatch, role):
+    class OutageGateway(Gateway):
+        failures = 0
+        def invoke(self, req, workspace):
+            if (req.role == role and req.context.get("capacity", {}).get("depth") == 1
+                    and req.context["score"]["u"] == .5):
+                self.failures += 1
+                raise TimeoutError("Node operation unavailable")
+            return super().invoke(req, workspace)
+
+    gateway = OutageGateway()
+    config = FixedPUCTConfig(screen_gate="execution_valid", max_trials=2, trial_workers=2,
+                             max_new_attempts_per_trial=2)
+    search = isolation_search(tmp_path, config, gateway)
+    monkeypatch.setattr(search, "_offer_promotion", lambda node: None)
+    try:
+        result = search.run(finalize=False)
+        assert gateway.failures == 2
+        assert not result["errors"] and not search.stop.is_set()
+        assert search.store.status()["trials"] == {"completed": 2}
+        assert search.store.db.execute("SELECT max(depth) FROM nodes WHERE eligible=1").fetchone()[0] == 2
+        assert search.store.db.execute("SELECT count(*) FROM trials WHERE stop='proposal_or_policy_failure'").fetchone()[0] == 1
+        assert search.store.budget()["reserved"] == 0
     finally:
         search.close()

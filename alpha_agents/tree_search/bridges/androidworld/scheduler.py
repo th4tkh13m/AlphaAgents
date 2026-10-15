@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from collections import Counter, deque
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -24,6 +25,7 @@ class TaskJob:
     stage: str
     estimated_seconds: float
     run: Callable[[str], Any]
+    testing_owner: str | None = None
 
     def __post_init__(self):
         import math
@@ -38,29 +40,102 @@ class TaskJob:
 
 
 class DeviceScheduler:
-    """At most six workers, each owning exactly one configured device.
+    """At most nine workers, each owning exactly one configured device.
 
     All callbacks execute outside the queue lock. Stop admission does not cancel
     already submitted jobs. Callback supervisors must bound real subprocesses;
     the scheduler never assumes a Python thread can terminate device work.
     """
 
-    def __init__(self, devices: tuple[str, ...], *, autostart=True):
-        if not devices or len(devices) > 6 or len(set(devices)) != len(devices):
-            raise ValueError("Configure one to six distinct devices")
+    def __init__(self, devices: tuple[str, ...], *, autostart=True, implementor_limit=9, recover_device=None):
+        if not devices or len(devices) > 9 or len(set(devices)) != len(devices):
+            raise ValueError("Configure one to nine distinct devices")
         self.devices = devices
         self.condition = threading.Condition()
         self.pending: list[tuple[TaskJob, Future]] = []
         self.running = Counter()
         self.round_robin = deque()
         self.quarantined: dict[str, str] = {}
+        self.recover_device = recover_device
+        self.recovering: set[str] = set()
         self.accepting = True
         self.started = False
         self.workers = []
         self.ids = set()
         self.history = []
+        if isinstance(implementor_limit, bool) or not isinstance(implementor_limit, int) or implementor_limit < 1:
+            raise ValueError("Implementor limit must be a positive integer")
+        self.implementor_limit = min(implementor_limit, len(devices))
+        self.testing: dict[str, str | None] = {}
+        self.waiting_implementors = deque()
+        self.active_devices = {}
         if autostart:
             self.start()
+
+    def _assign_testing(self):
+        """Rebuild affinity after quarantine; borrowing never changes ownership."""
+        assigned = set(self.testing.values())
+        for owner, device in self.testing.items():
+            if device is None or device in self.quarantined:
+                available = [d for d in self.devices if d not in self.quarantined and d not in assigned]
+                # After pool degradation existing implementors can share a
+                # healthy physical lane serially; never strand one on None.
+                if not available:
+                    available = sorted((d for d in self.devices if d not in self.quarantined),
+                                       key=lambda d: (list(self.testing.values()).count(d), d))
+                if available:
+                    self.testing[owner] = available[0]
+                    assigned.add(available[0])
+                else:
+                    self.testing[owner] = None
+        for owner, device in self.testing.items():
+            active = self.active_devices.get(device)
+            waiting = any(j.testing_owner == owner and not f.cancelled() for j, f in self.pending)
+            if waiting and active is not None and active.testing_owner != owner:
+                available = [d for d in self.devices if d not in self.quarantined
+                             and d not in self.testing.values() and d not in self.active_devices]
+                if available:
+                    # A loan must not force a check to wait while another
+                    # device is idle. Move only the logical reservation.
+                    self.testing[owner] = available[0]
+
+    @contextmanager
+    def implementation(self, owner):
+        """Admit a Codex implementor and give it one reclaimable testing lane."""
+        with self.condition:
+            if owner in self.testing or owner in self.waiting_implementors:
+                raise ValueError("Duplicate implementation reservation")
+            self.waiting_implementors.append(owner)
+            try:
+                while True:
+                    if not self.accepting:
+                        raise RuntimeError("Device scheduler admission has closed")
+                    healthy = len(self.devices) - len(self.quarantined)
+                    if not healthy and not self.recovering:
+                        raise DevicesUnavailable("All configured devices are quarantined")
+                    if (healthy and self.waiting_implementors[0] == owner and
+                            len(self.testing) < min(self.implementor_limit, healthy)):
+                        self.testing[owner] = None
+                        self._assign_testing()
+                        self.history.append({"event": "implementation_admit", "owner": owner,
+                                             "device": self.testing[owner]})
+                        break
+                    self.condition.wait()
+            finally:
+                self.waiting_implementors.remove(owner)
+                self.condition.notify_all()
+        try:
+            yield {"owner": owner, "device": self.testing[owner], "reclaim": "next-task-boundary"}
+        finally:
+            with self.condition:
+                # The caller must drain checks before releasing invocation scope.
+                while any(j.testing_owner == owner and not f.cancelled() for j, f in self.pending) or any(
+                        j.testing_owner == owner for j in self.active_devices.values()):
+                    self.condition.wait()
+                self.testing.pop(owner, None)
+                self._assign_testing()
+                self.history.append({"event": "implementation_release", "owner": owner})
+                self.condition.notify_all()
 
     def start(self):
         with self.condition:
@@ -78,8 +153,10 @@ class DeviceScheduler:
                 raise RuntimeError("Device scheduler admission has closed")
             if job.id in self.ids:
                 raise ValueError("Duplicate scheduled job identity")
-            if len(self.quarantined) == len(self.devices):
+            if len(self.quarantined) == len(self.devices) and not self.recovering:
                 raise DevicesUnavailable("All configured devices are quarantined")
+            if job.testing_owner is not None and job.testing_owner not in self.testing:
+                raise ValueError("Targeted job has no active implementation reservation")
             self.ids.add(job.id)
             future = Future()
             self.pending.append((job, future))
@@ -88,18 +165,17 @@ class DeviceScheduler:
             self.condition.notify_all()
             return future
 
-    def _pick(self):
+    def _pick(self, device):
         self.pending = [(job, future) for job, future in self.pending if not future.cancelled()]
-        if not self.pending:
+        self._assign_testing()
+        compatible = [(j, f) for j, f in self.pending if j.testing_owner is None or
+                      self.testing.get(j.testing_owner) == device]
+        if not compatible:
             return None
-        critical = [(job, future) for job, future in self.pending if job.critical]
-        candidates = critical or self.pending
-        queued_batches = {job.batch for job, _ in candidates}
-        # Borrowing is allowed only when the competing batch has no queued work.
-        cap = 3 if critical and len(queued_batches) >= 2 else len(self.devices)
-        eligible = {job.batch for job, _ in candidates if self.running[job.batch] < cap}
-        if not eligible:
-            return None
+        checks = [(j, f) for j, f in compatible if j.testing_owner is not None]
+        critical = [(job, future) for job, future in compatible if job.critical]
+        candidates = checks or critical or compatible
+        eligible = {job.batch for job, _ in candidates}
         for _ in range(len(self.round_robin)):
             batch = self.round_robin[0]
             self.round_robin.rotate(-1)
@@ -132,13 +208,14 @@ class DeviceScheduler:
                 while True:
                     if device in self.quarantined:
                         return
-                    selected = self._pick()
+                    selected = self._pick(device)
                     if selected:
                         break
                     if not self.accepting and not self.pending:
                         return
                     self.condition.wait()
                 job, future = selected
+                self.active_devices[device] = job
                 active = dict(self.running)
                 self.history.append({"event": "start", "job": job.id, "batch": job.batch,
                                      "device": device, "running": active})
@@ -155,12 +232,34 @@ class DeviceScheduler:
                 with self.condition:
                     if isinstance(error, UnhealthyDevice):
                         self.quarantined[device] = str(error)
+                        if self.recover_device is not None:
+                            self.recovering.add(device)
+                    self.active_devices.pop(device, None)
+                    self._assign_testing()
                     self.running[job.batch] -= 1
                     self.history.append({"event": "release", "job": job.id, "batch": job.batch, "device": device})
-                    if len(self.quarantined) == len(self.devices):
+                    if len(self.quarantined) == len(self.devices) and not self.recovering:
                         stranded = [queued for _, queued in self.pending if not queued.done()]
                         self.pending.clear()
                     self.condition.notify_all()
+                if device in self.recovering:
+                    # No task owns this device now. Recovery runs outside the
+                    # scheduler lock and is bounded by its subprocess supervisor.
+                    restored = False
+                    try:
+                        restored = self.recover_device(device, str(error)) is True
+                    except Exception:
+                        pass  # Keep quarantine; failure never becomes a reward.
+                    with self.condition:
+                        self.recovering.discard(device)
+                        if restored:
+                            self.quarantined.pop(device, None)
+                        self.history.append({"event": "device_recovery", "device": device, "healthy": restored})
+                        self._assign_testing()
+                        if len(self.quarantined) == len(self.devices) and not self.recovering:
+                            stranded.extend(queued for _, queued in self.pending if not queued.done())
+                            self.pending.clear()
+                        self.condition.notify_all()
                 # Settle scheduler ownership before waking callers. Future
                 # callbacks can acquire evaluator/database locks, so never
                 # execute them while holding the scheduler condition.
@@ -186,4 +285,13 @@ class DeviceScheduler:
     def status(self):
         with self.condition:
             return {"devices": list(self.devices), "quarantined": dict(self.quarantined),
-                    "queued": len(self.pending), "running": dict(self.running), "accepting": self.accepting}
+                    "recovering": sorted(self.recovering),
+                    "active_device_count": len(self.active_devices),
+                    "idle_healthy_device_count": len(self.devices) - len(self.quarantined) - len(self.active_devices),
+                    "queued_by_stage": dict(Counter(j.stage for j, f in self.pending if not f.cancelled())),
+                    "queued": len(self.pending), "running": dict(self.running), "accepting": self.accepting,
+                    "active_devices": {d: {"job": j.id, "stage": j.stage, "testing_owner": j.testing_owner}
+                                       for d, j in self.active_devices.items()},
+                    "testing_reservations": dict(self.testing),
+                    "waiting_implementors": list(self.waiting_implementors),
+                    "implementor_limit": self.implementor_limit}

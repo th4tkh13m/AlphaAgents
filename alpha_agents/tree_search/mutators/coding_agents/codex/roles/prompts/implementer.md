@@ -75,6 +75,15 @@ harness or overwrite that request while it is pending: the controller freezes
 the exact intermediate artifact and evaluates a separate copy through its
 shared resource queue, with normal reset/retry/cleanup accounting.
 
+Your invocation has one logical testing-device reservation. Its requested tasks
+execute serially on that device rather than consuming the whole evaluation pool.
+While you are coding or inspecting evidence, the controller may lend that device
+to canonical evaluation. A new check reclaims it after the running task completes
+its bounded reset/execution/cleanup envelope; this wait is expected and does not
+restart your invocation deadline. Quarantined devices may be replaced by the
+controller. Continue using this trusted check channel rather than accessing a
+device directly or assuming physical device state persists between checks.
+
 The coordinator publishes a `pending` receipt after admitting and freezing
 your diagnostic. This receipt confirms the invocation, attempt, check ID, and
 intermediate artifact; its null outcomes and snapshot are not measurements.

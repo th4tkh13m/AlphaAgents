@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Mapping
@@ -44,6 +46,7 @@ from alpha_agents.tree_search.core.mcts.responses import (
 from alpha_agents.tree_search.core.mcts.storage import (
     CapacityError,
     CatalogChanged,
+    OwnershipError,
     TreeStore,
 )
 from alpha_agents.tree_search.core.mcts.targeted_checks import TargetedChecks
@@ -96,6 +99,10 @@ def canonical_judge_context(s0: StageEvidence, tasks: tuple[str, ...]) -> dict:
 
 class AssessmentPending(RuntimeError):
     pass
+
+
+class EvaluationPending(AssessmentPending):
+    """An evaluator outage with the frozen attempt retained for recovery."""
 
 
 class ScreenRejected(ValueError):
@@ -155,6 +162,7 @@ class TrialExecutor:
         # A separate connection also permits the code-review phase to run in a
         # background thread while this worker evaluates benchmark tasks.
         store = TreeStore(self.store.directory, self.store.config, self.store.objective)
+        resources = ExitStack()
         try:
             if not role.startswith("judge_"):
                 self._restore_archive_evidence(context, store)
@@ -198,10 +206,17 @@ class TrialExecutor:
             request_id = store.consume_call(owner, purpose)
             checks = None
             if role == "implementer" and self.gateway.supports_checks and self.evaluator.supports_checks:
+                queued_at = time.time()
+                admission_started = time.monotonic()
+                testing_evaluator = resources.enter_context(self.evaluator.implementation_session(request_id))
+                write_json(self.store.directory / "role_requests" / request_id / "device_admission.json", {
+                    "queued_at": queued_at, "admitted_at": time.time(),
+                    "queue_seconds": time.monotonic() - admission_started,
+                    "reservation_owner": request_id, "release": "after-handoff-and-check-drain"})
                 binding = self.gateway.prepare_request(str(self.store.directory), request_id, role, artifact,
                                       self.settings.model, self.settings.effort, context)
                 scope = list(context["allowed_edit_scope"])
-                checks = TargetedChecks(store, self.artifacts, self.evaluator, workspace, binding,
+                checks = TargetedChecks(store, self.artifacts, testing_evaluator, workspace, binding,
                     self.screen_tasks + self.selection_tasks,
                     lambda parent, child: self._artifact_scope_valid(parent, child, scope))
                 context = {**context, "device_check_channel": checks.channel}
@@ -252,7 +267,10 @@ class TrialExecutor:
                 write_json(request_dir / "observed_metrics.json", {"elapsed_seconds": elapsed, **metadata})
                 store.record_cost("role:" + request_id, owner, role, self.gateway.telemetry_name, elapsed, "observed", metadata)
         finally:
-            store.close()
+            try:
+                resources.close()
+            finally:
+                store.close()
 
     def _workspace(self, artifact: str, purpose: str) -> Path:
         destination = self.store.directory / "workspaces" / f"{purpose}-{uuid.uuid4().hex}"
@@ -346,9 +364,20 @@ class TrialExecutor:
             payload = json.loads(row[0])
             evidence = StageEvidence(payload["artifact_id"], payload["stage"], payload["outcomes"], tuple(payload["evidence"]))
             evidence.validate_tasks(tasks)
-            self.evaluator.verify_stage(evidence)
+            try:
+                self.evaluator.verify_stage(evidence)
+            except OwnershipError:
+                raise
+            except (RuntimeError, OSError) as error:
+                raise EvaluationPending(f"Cached evaluation verification unavailable: {error}") from error
             return evidence
-        evidence = self.evaluator.evaluate(artifact, self._workspace(artifact, stage), stage, tasks)
+        workspace = self._workspace(artifact, stage)
+        try:
+            evidence = self.evaluator.evaluate(artifact, workspace, stage, tasks)
+        except OwnershipError:
+            raise
+        except (RuntimeError, OSError) as error:
+            raise EvaluationPending(f"{stage} evaluation unavailable: {error}") from error
         evidence.validate_tasks(tasks)
         if evidence.artifact_id != artifact or evidence.stage != stage:
             raise ValueError("Stage outcome identity mismatch")
@@ -393,6 +422,8 @@ class TrialExecutor:
                         if not proposal.get("archive_review"):
                             raise ValueError("Missing proposal archive review")
                         break
+                    except (sqlite3.Error, OwnershipError):
+                        raise
                     except Exception:
                         proposal = None
                 if proposal is None:
@@ -415,6 +446,8 @@ class TrialExecutor:
                             if set(raw) != {plan["id"] for plan in plans}:
                                 raise ValueError("Policy must cover exactly the proposed plans")
                             break
+                        except (sqlite3.Error, OwnershipError):
+                            raise
                         except Exception:
                             raw = {}
                     if not raw:
@@ -480,6 +513,8 @@ class TrialExecutor:
                                               policy_response=response)
                     success = True
                     return
+                except (sqlite3.Error, OwnershipError):
+                    raise
                 except Exception:
                     pass
             raise AssessmentPending("Policy refresh failed twice; previous valid priors retained")
@@ -491,7 +526,12 @@ class TrialExecutor:
 
     def assess(self, owner: str, artifact: str) -> CombinedScore:
         """Use identical artifact-only review and canonical evaluation for root/child."""
-        self.evaluator.prepare(artifact, {"screen": self.screen_tasks, "s0": tuple(self.s0_weights)})
+        try:
+            self.evaluator.prepare(artifact, {"screen": self.screen_tasks, "s0": tuple(self.s0_weights)})
+        except OwnershipError:
+            raise
+        except (RuntimeError, OSError) as error:
+            raise EvaluationPending(f"Evaluation preparation unavailable: {error}") from error
         existing = self.store.db.execute("SELECT * FROM judge_snapshots WHERE artifact=? ORDER BY rowid LIMIT 1", (artifact,)).fetchone()
         if existing:
             screen = self._stage(artifact, "screen", self.screen_tasks)
@@ -511,6 +551,9 @@ class TrialExecutor:
             return score
         except ScreenRejected:
             state = "screen_rejected"
+            raise
+        except EvaluationPending:
+            state = "evaluation_unavailable"
             raise
         except AssessmentPending:
             state = "judge_unavailable"
@@ -540,6 +583,8 @@ class TrialExecutor:
                 timing.mark("android_finish")
             try:
                 code_findings = code.result()
+            except (sqlite3.Error, OwnershipError):
+                raise
             except Exception as error:
                 code_findings = {"status": "unavailable", "error": str(error)}
         canonical = canonical_judge_context(s0, tuple(self.s0_weights))
@@ -552,6 +597,8 @@ class TrialExecutor:
             if final.get("canonical_evidence_id") != s0.identity or final.get("rubric_version") != self.store.objective.rubric_version:
                 raise ValueError("Final judge evidence/rubric identity mismatch")
             j, _ = judge_aggregate(final["dimensions"])
+        except (sqlite3.Error, OwnershipError):
+            raise
         except Exception as error:
             raise AssessmentPending("Final judge unavailable; preserve evaluation evidence") from error
         finally:
@@ -579,6 +626,8 @@ class TrialExecutor:
                                  "allowed_edit_scope": json.loads(plan["metadata"])["intervention"]["scope"],
                                  "parent_evidence": self._node_evidence(selection["parent"])}, workspace)
             implementation_status = result.get("status", "failed")
+        except (sqlite3.Error, OwnershipError):
+            raise
         except Exception:
             # A bounded failed engineering invocation may still leave a permitted
             # useful patch; its engineering status is not silently relabeled.
@@ -608,13 +657,14 @@ class TrialExecutor:
         except ScreenRejected as error:
             self.store.fail_attempt(attempt, str(error))
             return
+        except EvaluationPending:
+            self.store.awaiting(trial, "evaluation")
+            raise
         except AssessmentPending:
             self.store.awaiting(trial, "judge")
-            self.stop_admission.set()
             raise
         except Exception:
             self.store.awaiting(trial, "evaluation")
-            self.stop_admission.set()
             raise
         self.store.publish_score(attempt, score)
         if self.on_score:
@@ -660,7 +710,7 @@ class TrialExecutor:
         worker = "worker-" + uuid.uuid4().hex
         while True:
             if self.stop_admission.is_set():
-                self.store.stop_trial(trial, "operator_stop_or_peer_outage")
+                self.store.stop_trial(trial, "operator_or_global_stop")
                 break
             selection = self.store.select_and_reserve(trial, require_current_priors=True)
             kind = selection["kind"]
@@ -674,13 +724,12 @@ class TrialExecutor:
                     # Retain the persisted stop-reason spelling for old run readers.
                     self.store.stop_trial(trial, "codex_admission_capacity")
                     break
-                except Exception:
-                    self.stop_admission.set()
+                except AssessmentPending:
                     self.store.stop_trial(trial, "proposal_or_policy_failure")
                     break
             elif kind == "wait":
                 if self.stop_admission.wait(.1):
-                    self.store.stop_trial(trial, "peer_recovery_pending")
+                    self.store.stop_trial(trial, "operator_or_global_stop")
                     break
             elif kind == "implement":
                 self._implement(trial, selection)
@@ -711,11 +760,12 @@ class TrialExecutor:
                 if response.get("capacity_snapshot_id") != cap["snapshot_id"] or response.get("score_snapshot_id") != score.identity:
                     raise ValueError("Value response frontier identity mismatch")
                 vid = self.store.persist_value(trial, response["value"], cap, response)
+            except (sqlite3.Error, OwnershipError):
+                raise
             except Exception:
                 continue
             return self.store.backup(trial, vid)
         self.store.awaiting(trial, "value")
-        self.stop_admission.set()
         raise AssessmentPending("Value failed twice; pending frontier retained without synthetic backup")
 
     def recover(self, trial):
@@ -773,6 +823,9 @@ class TrialExecutor:
                     score = self.assess(attempt, artifact)
                 except ScreenRejected as error:
                     self.store.fail_attempt(attempt, str(error))
+                except EvaluationPending:
+                    self.store.awaiting(trial, "evaluation")
+                    raise
                 except AssessmentPending:
                     self.store.awaiting(trial, "judge")
                     raise

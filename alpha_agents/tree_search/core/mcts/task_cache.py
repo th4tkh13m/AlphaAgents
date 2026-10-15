@@ -115,7 +115,7 @@ class TaskCache:
         return batch
 
     def register_dispatch(self, dispatch: str, job: str, session: str, pool_size: int, owner: str, stage: str):
-        if isinstance(pool_size, bool) or not 1 <= pool_size <= 6 or stage not in {"screen", "s0", "targeted", "selection"}:
+        if isinstance(pool_size, bool) or not 1 <= pool_size <= 9 or stage not in {"screen", "s0", "targeted", "selection"}:
             raise ValueError("Dispatch requires a permitted stage and configured device pool")
         with self.store() as store, store.transaction():
             store.db.execute("INSERT INTO task_dispatches VALUES(?,?,?,?,?,?,'queued',?,NULL,NULL,NULL,NULL,NULL)",

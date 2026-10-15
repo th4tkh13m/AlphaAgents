@@ -36,7 +36,7 @@ class AssessmentTiming:
             store.close()
 
     def finish(self, state: str):
-        if state not in {"completed", "failed", "screen_rejected", "judge_unavailable"}:
+        if state not in {"completed", "failed", "screen_rejected", "judge_unavailable", "evaluation_unavailable"}:
             raise ValueError("Unknown terminal assessment timing state")
         store = TreeStore(self.directory, self.config, self.objective)
         try:

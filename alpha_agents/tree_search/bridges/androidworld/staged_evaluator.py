@@ -8,11 +8,13 @@ import subprocess
 import threading
 import time
 import uuid
-from concurrent.futures import Future
+from concurrent.futures import FIRST_COMPLETED, Future, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from alpha_agents.tree_search.bridges.androidworld import artemis
+from alpha_agents.tree_search.bridges.androidworld.device_recovery import device_failure
 from alpha_agents.tree_search.bridges.androidworld.devices import local_device_ports
 from alpha_agents.tree_search.bridges.androidworld.runtime import (
     evaluation_lock,
@@ -61,11 +63,12 @@ class StagedArtemisEvaluator(EvaluationAdapter):
     supports_checks = True
     def __init__(self, cache: TaskCache, artifacts: ArtifactStore, scheduler: DeviceScheduler,
                  config: dict, revision: EvaluationRevision, partitions: dict[str, tuple[str, ...]], owner: str,
-                 *, runner=artemis.run_stage, health_check=None, shared=None):
+                 *, runner=artemis.run_stage, health_check=None, shared=None, testing_owner=None):
         self.cache, self.artifacts, self.scheduler = cache, artifacts, scheduler
         self.config, self.revision, self.partitions, self.owner = dict(config), revision, partitions, owner
         self.runner, self.health_check = runner, health_check or self._health
         self.shared = shared or SharedEvaluationState()
+        self.testing_owner = testing_owner
         if set(partitions) != {"screen", "selection", "confirmation"}:
             raise ValueError("Freeze Screen, Selection, and protected Confirmation task membership")
         flattened = [task for tasks in partitions.values() for task in tasks]
@@ -95,9 +98,22 @@ class StagedArtemisEvaluator(EvaluationAdapter):
     def for_owner(self, owner):
         return StagedArtemisEvaluator(self.cache, self.artifacts, self.scheduler, self.config, self.revision,
                                      self.partitions, owner, runner=self.runner, health_check=self.health_check,
-                                     shared=self.shared)
+                                     shared=self.shared, testing_owner=self.testing_owner)
+
+    def scheduling_status(self):
+        return self.scheduler.status()
+
+    @contextmanager
+    def implementation_session(self, owner):
+        with self.scheduler.implementation(owner):
+            yield StagedArtemisEvaluator(self.cache, self.artifacts, self.scheduler, self.config, self.revision,
+                                        self.partitions, self.owner, runner=self.runner,
+                                        health_check=self.health_check, shared=self.shared, testing_owner=owner)
 
     def reconcile_interrupted(self, process_dead):
+        for path in (self.cache.directory / "device_recovery").glob("*/*/process/process.json"):
+            if not process_dead(path):
+                raise TaskIncomplete("Cannot prove or reclaim a recorded device recovery process")
         self.cache.reconcile_interrupted(
             lambda row: process_dead(Path(row["output"]) / "runner" / "process.json"),
             self.recover_completed,
@@ -267,6 +283,12 @@ class StagedArtemisEvaluator(EvaluationAdapter):
                 try:
                     unhealthy = not (finished and metadata.get("cleanup_status") == "completed" and
                                      self.health_check(device, max(0, remaining)))
+                    # A responsive ADB shell does not prove accessibility or
+                    # transport recovery after a known infrastructure failure.
+                    infrastructure_failure = device_failure(summary)
+                    if infrastructure_failure:
+                        unhealthy = True
+                        error = (error + "; " if error else "") + infrastructure_failure
                 except Exception as health_error:
                     unhealthy = True
                     error = (error + "; " if error else "") + f"Health check failed: {health_error}"
@@ -381,7 +403,8 @@ class StagedArtemisEvaluator(EvaluationAdapter):
                     self.cache.finish_dispatch(job_id, state, time.monotonic() - started)
             try:
                 future = self.scheduler.submit(TaskJob(job_id, self.owner, stage,
-                    self.config.get("runtime_forecasts", {}).get(identity.template, 1800), execute_dispatch))
+                    self.config.get("runtime_forecasts", {}).get(identity.template, 1800), execute_dispatch,
+                    testing_owner=self.testing_owner if stage == "targeted" else None))
             except Exception:
                 self.cache.finish_unstarted_dispatch(job_id)
                 raise
@@ -414,25 +437,22 @@ class StagedArtemisEvaluator(EvaluationAdapter):
                     futures[identity.template] = self._submit(identity, stage)
                 except Exception as failure:
                     errors.append(str(failure))
-        for identity in identities:
-            if identity.template in results:
-                continue
-            if identity.template not in futures:
-                continue
-            future = futures[identity.template]
-            for retry in range(2):
+        pending = {future: (identity, 0) for identity in identities
+                   if (future := futures.get(identity.template)) is not None}
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                identity, retry = pending.pop(future)
                 try:
                     results[identity.template] = future.result()
-                    break
                 except Exception as failure:
                     if retry:
                         errors.append(str(failure))
                     else:
                         try:
-                            future = self._submit(identity, stage)
+                            pending[self._submit(identity, stage)] = (identity, 1)
                         except Exception as admission_error:
                             errors.append(str(admission_error))
-                            break
         # Drain every admitted task before reporting an incomplete stage.
         if errors:
             raise TaskIncomplete("Stage remains incomplete: " + "; ".join(errors))

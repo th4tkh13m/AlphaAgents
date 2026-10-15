@@ -324,8 +324,10 @@ def test_production_build_owns_resources_and_cleans_partial_construction(tmp_pat
     events = []
 
     class Scheduler:
-        def __init__(self, devices, autostart):
+        def __init__(self, devices, autostart, implementor_limit, recover_device):
             assert autostart is False
+            assert implementor_limit == 9
+            assert callable(recover_device)
 
         def start(self):
             events.append("start")

@@ -579,11 +579,9 @@ class TreeStore:
             count = self.db.execute("SELECT count(*) FROM trials").fetchone()[0]
             if count >= self.config.max_trials:
                 raise CapacityError("Trial limit reached")
-            active = self.db.execute("SELECT count(*) FROM trials WHERE state!='completed'").fetchone()[0]
+            active = self.db.execute("SELECT count(*) FROM trials WHERE state='active'").fetchone()[0]
             if active >= self.config.trial_workers:
-                raise CapacityError("Trial workers occupied or recovery pending")
-            if self.db.execute("SELECT 1 FROM trials WHERE state IN ('awaiting_value','awaiting_judge','awaiting_evaluation')").fetchone():
-                raise CapacityError("Assessment recovery pending; new admission stopped")
+                raise CapacityError("Trial workers occupied")
             root = self.db.execute("SELECT value FROM meta WHERE key='root'").fetchone()
             if root is None:
                 raise ValueError("A scored root is required before trial admission")
@@ -864,17 +862,34 @@ class TreeStore:
             can_generate = (used < self.config.max_new_attempts_per_trial and total < self.config.max_attempts
                             and self.budget()["available"] >= 3)
             choices = []
+            inflight = {row["plan"]: row["count"] for row in self.db.execute(
+                "SELECT s.plan,count(*) AS count FROM selections s JOIN trials t ON t.id=s.trial "
+                "WHERE s.parent=? AND s.released=0 AND t.state='active' GROUP BY s.plan",
+                (node["id"],))}
             for p in self.db.execute("SELECT * FROM plans WHERE node=? ORDER BY id", (node["id"],)):
                 attempts = [dict(a) for a in self.db.execute("SELECT * FROM attempts WHERE plan=? ORDER BY slot", (p["id"],))]
                 children = [a for a in attempts if a["state"] == "eligible"]
                 new = can_generate and len(attempts) < self.config.max_implementations
-                reserved = self.db.execute("SELECT 1 FROM selections WHERE plan=? AND released=0", (p["id"],)).fetchone()
-                if (new or children) and not reserved:
+                if new or children:
                     choices.append((p, attempts, children, new))
             if not choices:
-                reserved = self.db.execute("SELECT 1 FROM selections WHERE parent=? AND released=0 AND trial!=?", (node["id"], trial)).fetchone()
-                return {"kind": "wait" if cap["pending"] or reserved else "cutoff", "capacity": cap}
-            selected = select_edge([Edge(p["id"], p["n"], p["w"], priors[p["id"]]) for p, _, _, _ in choices], node["n"], self.config.c_puct)
+                # Parked attempts still own their immutable slots and completion
+                # reserves, but cannot produce progress until explicit recovery.
+                # Wait only for live workers, never indefinitely for parked work.
+                live = self.db.execute(
+                    "SELECT 1 FROM selections s JOIN trials t ON t.id=s.trial "
+                    "WHERE s.parent=? AND s.released=0 AND s.trial!=? AND t.state='active'",
+                    (node["id"], trial)).fetchone()
+                return {"kind": "wait" if live else "cutoff", "capacity": cap,
+                        "reason": "pending_recovery" if cap["pending"] else "computational_cutoff"}
+            # Pending selections reduce exploration pressure without inventing
+            # observed returns or modifying permanent visit counts. Preserve Q.
+            def pending_edge(id, visits, total, prior, pending):
+                effective = visits + pending
+                return Edge(id, effective, total * effective / visits if visits else 0, prior)
+            selected = select_edge([pending_edge(p["id"], p["n"], p["w"], priors[p["id"]],
+                                                 inflight.get(p["id"], 0)) for p, _, _, _ in choices],
+                                   node["n"] + sum(inflight.values()), self.config.c_puct)
             p, attempts, children, new = next(item for item in choices if item[0]["id"] == selected.id)
             implementation_priors = {a["id"]: 1 / len(children) for a in children}
             if new:
@@ -884,7 +899,13 @@ class TreeStore:
                                 (aid, trial, p["id"], len(attempts) + 1))
                 child = None
             else:
-                edge = select_edge([Edge(str(a["slot"]), a["n"], a["w"], implementation_priors[a["id"]]) for a in children], p["n"], self.config.c_impl)
+                pending_attempts = {row["attempt"]: row["count"] for row in self.db.execute(
+                    "SELECT s.attempt,count(*) AS count FROM selections s JOIN trials t ON t.id=s.trial "
+                    "WHERE s.plan=? AND s.released=0 AND t.state='active' GROUP BY s.attempt",
+                    (p["id"],))}
+                edge = select_edge([pending_edge(str(a["slot"]), a["n"], a["w"], implementation_priors[a["id"]],
+                                                 pending_attempts.get(a["id"], 0)) for a in children],
+                                   p["n"] + inflight.get(p["id"], 0), self.config.c_impl)
                 a = next(a for a in children if str(a["slot"]) == edge.id)
                 aid, child = a["id"], a["child"]
             pos = self.db.execute("SELECT count(*) FROM selections WHERE trial=?", (trial,)).fetchone()[0]
@@ -958,7 +979,8 @@ class TreeStore:
             "objective_id": self.objective.identity,
             "execution_identity": fingerprint(json.loads(identity[0])) if identity else None,
             "selection": {"algorithm": "two-level-puct", "c_puct": self.config.c_puct,
-                          "c_impl": self.config.c_impl, "prior_floor": self.config.prior_floor},
+                          "c_impl": self.config.c_impl, "prior_floor": self.config.prior_floor,
+                          "parallel_selection": "pending-visits-preserve-observed-q-v1"},
             "max_plans": self.config.max_plans, "max_implementations": self.config.max_implementations,
             "expansion": "Propose three admissible frozen plans at an open node; preserve used local capacity.",
             "implementation": "Fill unused slots incrementally first; once full, select exact eligible stored children with implementation PUCT.",

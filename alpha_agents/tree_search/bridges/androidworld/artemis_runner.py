@@ -99,6 +99,9 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    from device_recovery import install_device_local_adb_policy
+
+    install_device_local_adb_policy()
     from adbutils import AdbClient
     from android_world import checkpointer, registry
     from android_world.env import adb_utils, env_launcher
