@@ -2238,3 +2238,78 @@ def test_local_evaluation_recovery_reuses_screen_and_implementation(engine_facto
         assert store.budget()["reserved"] == 0
     finally:
         store.close()
+
+
+@pytest.mark.parametrize('context_kind', ['archive', 'development'])
+def test_policy_attempt_citations_use_explicit_emitted_id_registry(engine_factory, context_kind):
+    from alpha_agents.tree_search.core.mcts.responses import validate_response
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+
+    store, executor, _, _ = engine_factory()
+    try:
+        executor.run(store.reserve_trial())
+        attempt = store.db.execute('SELECT id FROM attempts').fetchone()[0]
+        catalog = executor._catalog()
+        development = store.development_evidence('root')
+        assert catalog['attempt_ids'] == [attempt]
+        assert development['observed_attempt_ids'] == [attempt]
+        root = store.score('root').artifact_id
+        context = {'plans': catalog['plans'], 'evidence_snapshot_id': 'evidence',
+                   **({'plan_archive': catalog} if context_kind == 'archive' else {'development_evidence': development})}
+        request = RoleRequest(str(store.directory), 'policy-citation', 'policy', root, 'model', 'low', context)
+        response = contract_response(request, {'artifact_id': root, 'priors': {p['id']: 1 for p in catalog['plans']}})
+        response['evidence'] = [attempt]
+        workspace = executor._workspace(root, 'policy-citation')
+        assert validate_response(response, request, workspace) == response
+        with pytest.raises(ValueError, match='out-of-scope'):
+            validate_response({**response, 'evidence': ['attempt-' + 'f' * 32]}, request, workspace)
+        # Generic `id` remains insufficient: the validator is not broadened.
+        legacy = copy.deepcopy(context)
+        if context_kind == 'archive':
+            legacy['plan_archive'].pop('attempt_ids')
+        else:
+            legacy['development_evidence'].pop('observed_attempt_ids')
+        old_request = RoleRequest(str(store.directory), 'policy-citation', 'policy', root, 'model', 'low', legacy)
+        with pytest.raises(ValueError, match='out-of-scope'):
+            validate_response(response, old_request, workspace)
+        assert role_permissions(request, workspace)['filesystem'] == role_permissions(old_request, workspace)['filesystem']
+    finally:
+        store.close()
+
+
+def test_value_attempt_registry_is_derived_from_frozen_reachable_capacity(engine_factory):
+    from alpha_agents.tree_search.core.mcts.responses import validate_response
+    from alpha_agents.tree_search.core.mcts.value_context import continuation_context
+
+    store, executor, _, _ = engine_factory()
+    try:
+        executor.run(store.reserve_trial())
+        attempt = store.db.execute('SELECT id FROM attempts').fetchone()[0]
+        capacity = store.snapshot_frontier(None, node='root')
+        root_score = store.score('root')
+        context = {**continuation_context(store, executor.artifacts, capacity),
+                   'score_snapshot_id': root_score.identity, 'capacity_snapshot_id': capacity['snapshot_id'],
+                   'objective_id': store.objective.identity, 'discount_factor': capacity['discount_factor'],
+                   'continuation_policy_id': capacity['continuation_policy_id']}
+        assert context['reachable_attempt_ids'] == [attempt]
+        request = RoleRequest(str(store.directory), 'value-citation', 'value', root_score.artifact_id, 'model', 'low', context)
+        response = contract_response(request, {'artifact_id': root_score.artifact_id, 'value': 0,
+            'score_snapshot_id': root_score.identity, 'capacity_snapshot_id': capacity['snapshot_id']})
+        response['evidence'] = [attempt]
+        workspace = executor._workspace(root_score.artifact_id, 'value-citation')
+        assert validate_response(response, request, workspace) == response
+        with pytest.raises(ValueError, match='out-of-scope'):
+            validate_response({**response, 'evidence': ['attempt-' + 'f' * 32]}, request, workspace)
+    finally:
+        store.close()
+
+
+def test_attempt_registry_in_code_findings_does_not_authorize_judge_citations(tmp_path):
+    from alpha_agents.tree_search.core.mcts.responses import _evidence
+
+    attempt = 'attempt-' + 'a' * 32
+    request = RoleRequest(str(tmp_path), 'judge', 'judge_execution', 'artifact', 'model', 'low',
+        {'canonical_evidence': {'snapshot_id': 'canonical', 'evidence': ['trace']},
+         'code_findings': {'attempt_ids': [attempt]}})
+    with pytest.raises(ValueError, match='out-of-scope'):
+        _evidence([attempt], request, tmp_path / 'workspace')

@@ -14,7 +14,7 @@ from alpha_agents.tree_search.bridges.androidworld.staged_evaluator import (
     EvaluationRevision,
     StagedArtemisEvaluator,
 )
-from alpha_agents.tree_search.core.mcts.artifacts import ArtifactStore
+from alpha_agents.tree_search.core.mcts.artifacts import ArtifactStore, manifest as artifact_manifest
 from alpha_agents.tree_search.core.mcts.contracts import (
     ARTIFACT_RUBRIC_VERSION,
     FixedPUCTConfig,
@@ -111,6 +111,8 @@ def resolve_config(config, base):
     if config["codex"]["runtime"].get("verification_python"):
         config["codex"]["runtime"]["verification_python"] = resolve(config["codex"]["runtime"]["verification_python"], interpreter=True)
     config["evaluation"]["manifest"] = resolve(config["evaluation"]["manifest"])
+    if config.get("sequence", {}).get("cached_root_run"):
+        config["sequence"]["cached_root_run"] = resolve(config["sequence"]["cached_root_run"])
     return config
 
 
@@ -150,6 +152,8 @@ def evaluation_model_identity(evaluation, harness, output):
 
 
 def build(config, output):
+    if config["controller"]["type"] == "task_sequence":
+        return build_sequence(config, output)
     if config["harness"]["type"] != "androidworld":
         raise ValueError("Fixed PUCT v1 uses the trusted staged AndroidWorld/Artemis adapter")
     settings = config["controller"]
@@ -161,6 +165,16 @@ def build(config, output):
     if "device_hour_cap" in settings or "device_hour_cap" in harness:
         raise ValueError("V1 does not configure a device-hour cap")
     subset = prepare(json.loads(Path(evaluation["manifest"]).read_text()), harness["seed"])
+    if search.evaluation_task:
+        task = search.evaluation_task
+        if task not in subset["screen"] + subset["selection"]:
+            raise ValueError("Single-task objective must be a development task in the manifest")
+        subset = {"algorithm": "single-development-task-v1", "seed": harness["seed"],
+                  "source_manifest_hash": subset["source_manifest_hash"],
+                  "tasks": [{"task": task, "weight": {"numerator": 1, "denominator": 1, "display": 1.0}}],
+                  "screen": [], "selection": [task], "protected_confirmation": subset["protected_confirmation"],
+                  "complement": [], "coverage": {"selected_tasks": 1, "generalization": "unmeasured"}}
+        subset["manifest_id"] = fingerprint(subset)
     attestation = observe_androidworld(Path(harness["androidworld_root"]), evaluation["androidworld_revision"])
     harness["androidworld_source_attestation"] = attestation
     revision = EvaluationRevision(evaluation_model_identity(evaluation, harness, output), trusted_runner_revision(evaluation["androidworld_revision"], attestation),
@@ -204,3 +218,48 @@ def build(config, output):
             if coordinator is not None:
                 coordinator.close()
         raise
+
+
+def build_sequence(config, output):
+    from alpha_agents.tree_search.bridges.androidworld.sequence_cache import import_root_receipt, root_receipts
+    from alpha_agents.tree_search.core.mcts.task_sequence import TaskSequence
+    from alpha_agents.tree_search.core.shared.storage import write_json
+
+    index = root_receipts(config["sequence"]["cached_root_run"])
+    tasks = index["failed_tasks"]
+    manifest = json.loads(Path(config["evaluation"]["manifest"]).read_text())
+    development = {row["task"] for row in manifest["rows"] if row["stage"].lower() in {"screen", "selection"}}
+    if not set(tasks) <= development:
+        raise ValueError("Cached failures contain an unknown or protected task")
+    if len(config["harness"]["config"]["androidworld_devices"]) != 4:
+        raise ValueError("The sequential experiment requires exactly four emulators")
+    source = Path(config["harness"]["source"])
+    if fingerprint(artifact_manifest(source)) != index["artifact_id"]:
+        raise ValueError("Sequence source must be the cached root harness")
+    output = Path(output)
+    index_path = output / "cached_root_index.json"
+    if index_path.exists():
+        if json.loads(index_path.read_text()) != index:
+            raise ValueError("Cached-root receipt index changed; use a new sequence directory")
+    else:
+        write_json(index_path, index)
+
+    def application(task, position, harness_source, directory):
+        settings = json.loads(json.dumps(config))
+        settings.pop("sequence")
+        settings["controller"].update(type="fixed_puct", evaluation_task=task, max_depth=8,
+                                      max_trials=30, max_new_attempts_per_trial=8, max_attempts=240,
+                                      max_plans=3, max_implementations=3, device_limit=4)
+        settings["harness"]["source"] = str(harness_source)
+        app = build(settings, directory)
+        try:
+            import_root_receipt(app, index, task)
+            write_json(directory / "task_sequence_context.json", {"task": task, "position": position,
+                       "source_harness": str(harness_source), "cached_root_index": str(output / "cached_root_index.json")})
+            return app
+        except BaseException:
+            app.close()
+            raise
+
+    from alpha_agents.tree_search.infrastructure.sequence_monitor import SequenceMonitor
+    return TaskSequence(output, source, tasks, config, application, monitor=SequenceMonitor(output))

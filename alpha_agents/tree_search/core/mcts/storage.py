@@ -796,7 +796,8 @@ class TreeStore:
                 result["payload"] = json.loads(result["payload"])
             attempts.append(entry)
         result = {"node": node, "artifact_id": parent["artifact"],
-                  "parent_score": json.loads(parent["score"]), "observed_attempts": attempts}
+                  "parent_score": json.loads(parent["score"]), "observed_attempts": attempts,
+                  "observed_attempt_ids": [attempt["id"] for attempt in attempts]}
         review = self._judge_narrative_review(self.score(node).j_snapshot_id)
         if review:
             result["judge_narrative_review_id"] = review["id"]

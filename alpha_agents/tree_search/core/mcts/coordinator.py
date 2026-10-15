@@ -166,6 +166,8 @@ class FixedPUCTCoordinator:
             store.close()
 
     def _offer_promotion(self, node):
+        if self.config.evaluation_task:
+            return None  # The canonical task is already the complete objective.
         score = self.store.score(node)
         with self.store.transaction():
             row = self.store.db.execute("SELECT value FROM meta WHERE key='incumbent_s0'").fetchone()

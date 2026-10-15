@@ -50,6 +50,7 @@ class FixedPUCTConfig:
     trial_workers: int = 2
     device_limit: int = 6
     implementor_limit: int = 9
+    evaluation_task: str | None = None
     # Historical storage names; execution uses the generic accessors below.
     codex_invocation_cap: int = 2000
     codex_run_timeout_seconds: int = 7200
@@ -72,6 +73,8 @@ class FixedPUCTConfig:
         return cls(**settings)
 
     def __post_init__(self):
+        if self.evaluation_task is not None and (not isinstance(self.evaluation_task, str) or not self.evaluation_task.strip()):
+            raise ValueError("Single-task search requires a nonempty task name")
         if self.screen_gate not in {"strict_all_success", "execution_valid"}:
             raise ValueError("Explicit screen_gate must be strict_all_success or execution_valid")
         if self.max_plans != 3 or self.max_implementations != 3:
@@ -85,8 +88,8 @@ class FixedPUCTConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         ceilings = {
-            "max_depth": 8, "max_trials": 30, "max_new_attempts_per_trial": 3,
-            "max_attempts": 90, "max_plans": 3, "max_implementations": 3,
+            "max_depth": 8, "max_trials": 30, "max_new_attempts_per_trial": 8 if self.evaluation_task else 3,
+            "max_attempts": 240 if self.evaluation_task else 90, "max_plans": 3, "max_implementations": 3,
             "trial_workers": 9, "device_limit": 9, "shortlist_limit": 3, "implementor_limit": 9,
         }
         for name, ceiling in ceilings.items():

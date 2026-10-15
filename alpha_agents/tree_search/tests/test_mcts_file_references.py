@@ -140,3 +140,48 @@ def test_catalog_ids_are_stable_and_do_not_change_stage_identity(tmp_path):
     assert first == second
     assert stage.identity == identity == first['snapshot_id']
     assert first['file_catalog'][0]['files'][0]['reference_id'] == 's0-file-0001'
+
+
+def test_value_continuation_task_file_and_bundle_ids_share_permission_contract(tmp_path):
+    from alpha_agents.tree_search.core.mcts.plan_archive import freeze_continuation_evidence
+    from alpha_agents.tree_search.core.mcts.responses import validate_response
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    task_root = tmp_path / 'tasks' / ('c' * 64) / 'execution' / 'evidence'
+    task_root.mkdir(parents=True)
+    summary = task_root / 'summary.json'
+    summary.write_text('{"success": false}')
+    nested_id = 'd' * 64
+    payload = {'snapshot_id': 'capacity', 'reachable_evidence': {
+        'child': {'evaluations': [{'snapshot_id': nested_id, 'payload': {'evidence': [str(task_root)]}}]}}}
+    frozen = freeze_continuation_evidence(tmp_path, payload)
+    context = {'score_snapshot_id': 'score', 'capacity_snapshot_id': 'capacity', 'objective_id': 'objective',
+               'discount_factor': .9, 'continuation_policy_id': 'policy',
+               'continuation_evidence': {**frozen, 'capacity_snapshot_id': 'capacity', 'canonical_evidence': [str(task_root)]}}
+    request = RoleRequest(str(tmp_path), 'value', 'value', 'artifact', 'model', 'low', context)
+    profile = role_permissions(request, workspace)
+    assert profile['filesystem'][str(task_root)] == 'read'
+    response = {'artifact_id': 'artifact', 'status': 'completed', 'value': .1,
+                **{key: context[key] for key in ('score_snapshot_id', 'capacity_snapshot_id', 'objective_id',
+                                                'discount_factor', 'continuation_policy_id')},
+                'rationale': 'Inspected task and reachable node evidence', 'uncertainty': 'One task only',
+                'evidence': [str(summary), nested_id]}
+    assert validate_response(response, request, workspace) == response
+    with pytest.raises(ValueError, match='rather than directories'):
+        validate_response({**response, 'evidence': [str(task_root)]}, request, workspace)
+    sibling = task_root.parent.parent.parent / ('e' * 64) / 'execution/evidence/summary.json'
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text('{}')
+    with pytest.raises(ValueError, match='out-of-scope'):
+        validate_response({**response, 'evidence': [str(sibling)]}, request, workspace)
+    with pytest.raises(ValueError):
+        validate_response({**response, 'evidence': ['f' * 64]}, request, workspace)
+    # A checksum mismatch rejects the declaration even if the cited file exists.
+    bad_context = {**context, 'continuation_evidence': {**context['continuation_evidence'], 'evidence_bundle_hash': '0' * 64}}
+    bad_request = RoleRequest(str(tmp_path), 'other', 'value', 'artifact', 'model', 'low', bad_context)
+    with pytest.raises(ValueError, match='hash mismatch'):
+        validate_response(response, bad_request, workspace)
+    with pytest.raises(ValueError, match='hash mismatch'):
+        role_permissions(bad_request, workspace)

@@ -66,6 +66,8 @@ def continuation_context(store, artifacts, capacity):
                          for evaluation in evidence["evaluations"]
                          for reference in evaluation["payload"].get("evidence", [])})
     return {"capacity": {key: value for key, value in capacity.items() if key != "reachable_evidence"},
+            "reachable_attempt_ids": sorted({attempt["id"] for node in capacity["reachable_subtree"]
+                                              for plan in node["plans"] for attempt in plan["attempts"]}),
             "continuation_evidence": {**frozen, "capacity_snapshot_id": capacity["snapshot_id"],
                                       "canonical_evidence": references},
             "reachable_code_views": views,

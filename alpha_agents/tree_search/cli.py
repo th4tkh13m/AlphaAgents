@@ -11,7 +11,7 @@ from .core.dgm.controller import DGMController, SearchConfig
 def resolve_config(config: dict, base: Path) -> dict:
     """Resolve local paths relative to the config file, independent of cwd."""
     config = json.loads(json.dumps(config))
-    if config.get("controller", {}).get("type") == "fixed_puct":
+    if config.get("controller", {}).get("type") in {"fixed_puct", "task_sequence"}:
         from alpha_agents.tree_search.composition import resolve_config as resolve_fixed
         return resolve_fixed(config, base)
 
@@ -46,7 +46,7 @@ def resolve_config(config: dict, base: Path) -> dict:
 
 
 def build(config: dict, output: Path):
-    if config.get("controller", {}).get("type") == "fixed_puct":
+    if config.get("controller", {}).get("type") in {"fixed_puct", "task_sequence"}:
         from alpha_agents.tree_search.composition import build as build_fixed
         return build_fixed(config, output)
     if config.get("controller", {}).get("type", "dgm") != "dgm":
@@ -144,6 +144,9 @@ def main():
         "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO"
     )
     args = parser.parse_args()
+    if args.command == "status" and (args.output / "sequence.json").is_file():
+        print((args.output / "sequence.json").read_text())
+        return
     if args.command in {"status", "export", "grant-invocations", "grant-task-recovery"}:
         from alpha_agents.tree_search.core.mcts.storage import TreeStore
         inspected = TreeStore.readonly(args.output)
@@ -202,7 +205,7 @@ def main():
         args.config.resolve().parent,
     )
     controller = build(config, args.output)
-    if config.get("controller", {}).get("type") == "fixed_puct":
+    if config.get("controller", {}).get("type") in {"fixed_puct", "task_sequence"}:
         import signal
         previous = {}
         def request_stop(signum, frame):

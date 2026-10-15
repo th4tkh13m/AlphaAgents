@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+from alpha_agents.tree_search.core.mcts.evidence_scope import continuation_bundle, value_task_roots
+
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import (
     RoleRequest,
 )
@@ -33,6 +35,10 @@ def runtime_permissions(profile: dict, codex_bin: str, verification_python: str 
 
 
 def role_permissions(request: RoleRequest, workspace: Path) -> dict:
+    # Use the same declaration validation as response citations, preserving the
+    # existing read scope rather than granting paths discovered inside bundles.
+    value_task_roots(request)
+    continuation_bundle(request)
     workspace = workspace.resolve()
     run = Path(request.run_id).resolve()
     rules = {":minimal": "read", str(workspace): "write" if request.role == "implementer" else "read"}

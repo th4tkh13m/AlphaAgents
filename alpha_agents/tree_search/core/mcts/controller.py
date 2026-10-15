@@ -121,7 +121,10 @@ class TrialExecutor:
         self.screen_tasks = screen_tasks
         self.s0_weights = dict(s0_weights)
         self.selection_tasks = tuple(selection_tasks) if selection_tasks is not None else tuple(s0_weights)
-        if not screen_tasks or len(set(screen_tasks)) != len(screen_tasks) or not s0_weights:
+        single = store.config.evaluation_task
+        if single and (screen_tasks or self.s0_weights != {single: 1.0} or self.selection_tasks != (single,)):
+            raise ValueError("Single-task search evaluates exactly its one task without Screen")
+        if (not screen_tasks and not single) or len(set(screen_tasks)) != len(screen_tasks) or not s0_weights:
             raise ValueError("Frozen Screen and S0 task manifests are required")
         if any(unit(w, "task weight") == 0 for w in s0_weights.values()) or abs(sum(s0_weights.values()) - 1) > 1e-12:
             raise ValueError("Frozen S0 task weights must be positive and sum to one")
@@ -134,7 +137,8 @@ class TrialExecutor:
         if not role.startswith("judge_"):
             context = {**context, "utility_context": {
                 "version": "weighted-canonical-combined-v2", "s0_task_weights": self.s0_weights,
-                "judge_weight": self.store.objective.judge_weight}}
+                "judge_weight": self.store.objective.judge_weight,
+                "evaluation_task": self.store.config.evaluation_task}}
         if role in {"proposer", "policy"}:
             policy = self.store.continuation_policy()
             context = {**context, "discount_factor": policy["discount_factor"],
@@ -338,7 +342,8 @@ class TrialExecutor:
                           **freeze_metadata(self.store.directory, p["id"], metadata),
                           "intervention": metadata["intervention"], "attempts": summaries,
                           "status": "registered" if not attempts else "attempted"})
-        return {"snapshot_id": fingerprint(plans), "plans": plans, "plan_ids": [p["id"] for p in plans]}
+        return {"snapshot_id": fingerprint(plans), "plans": plans, "plan_ids": [p["id"] for p in plans],
+                "attempt_ids": sorted(attempt["id"] for plan in plans for attempt in plan["attempts"])}
 
     def _restore_archive_evidence(self, context: dict, store: TreeStore):
         # Rebuild the exact older snapshot supplied to a recovered request, even
@@ -527,16 +532,18 @@ class TrialExecutor:
     def assess(self, owner: str, artifact: str) -> CombinedScore:
         """Use identical artifact-only review and canonical evaluation for root/child."""
         try:
-            self.evaluator.prepare(artifact, {"screen": self.screen_tasks, "s0": tuple(self.s0_weights)})
+            self.evaluator.prepare(artifact, {**({"screen": self.screen_tasks} if self.screen_tasks else {}),
+                                              "s0": tuple(self.s0_weights)})
         except OwnershipError:
             raise
         except (RuntimeError, OSError) as error:
             raise EvaluationPending(f"Evaluation preparation unavailable: {error}") from error
         existing = self.store.db.execute("SELECT * FROM judge_snapshots WHERE artifact=? ORDER BY rowid LIMIT 1", (artifact,)).fetchone()
         if existing:
-            screen = self._stage(artifact, "screen", self.screen_tasks)
-            if self.store.config.screen_gate == "strict_all_success" and not all(screen.outcomes.values()):
-                raise ScreenRejected("Strict Screen gate rejected a valid task failure")
+            if self.screen_tasks:
+                screen = self._stage(artifact, "screen", self.screen_tasks)
+                if self.store.config.screen_gate == "strict_all_success" and not all(screen.outcomes.values()):
+                    raise ScreenRejected("Strict Screen gate rejected a valid task failure")
             s0 = self._stage(artifact, "s0", tuple(self.s0_weights))
             if existing["canonical_id"] != s0.identity:
                 raise ValueError("Canonical judge identifies another frozen evaluation")
@@ -574,9 +581,10 @@ class TrialExecutor:
             code = review_pool.submit(review_code)
             timing.mark("android_start")
             try:
-                screen = self._stage(artifact, "screen", self.screen_tasks)
-                if self.store.config.screen_gate == "strict_all_success" and not all(screen.outcomes.values()):
-                    raise ScreenRejected("Strict Screen gate rejected a valid task failure")
+                if self.screen_tasks:
+                    screen = self._stage(artifact, "screen", self.screen_tasks)
+                    if self.store.config.screen_gate == "strict_all_success" and not all(screen.outcomes.values()):
+                        raise ScreenRejected("Strict Screen gate rejected a valid task failure")
                 s0 = self._stage(artifact, "s0", tuple(self.s0_weights))
                 timing.mark("s0_ready")
             finally:

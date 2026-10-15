@@ -72,7 +72,11 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         if set(partitions) != {"screen", "selection", "confirmation"}:
             raise ValueError("Freeze Screen, Selection, and protected Confirmation task membership")
         flattened = [task for tasks in partitions.values() for task in tasks]
-        if len(flattened) != len(set(flattened)) or any(not tasks for tasks in partitions.values()):
+        single = cache.config.evaluation_task
+        if single and (partitions["screen"] or tuple(partitions["selection"]) != (single,)):
+            raise ValueError("Single-task partitions require only the selected development task")
+        if len(flattened) != len(set(flattened)) or any(
+                not tasks for key, tasks in partitions.items() if not (single and key == "screen")):
             raise ValueError("Frozen task partitions must be nonempty, unique, and disjoint")
         required = {"python", "androidworld_root", "adb_path", "model", "base_url", "seed"}
         if not required <= set(config) or any(not config[key] for key in required - {"seed"}):

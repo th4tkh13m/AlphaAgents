@@ -44,6 +44,7 @@ VALUE = _load_prompt("value.md")
 
 GOAL_OBJECTIVE_TEMPLATE = _load_prompt("goal_objective.md")
 CONTEXT_GUIDANCE = json.loads(_load_prompt("context_guidance.json"))
+SINGLE_TASK = _load_prompt("single_task.md")
 
 
 def _decorate_context(role: str, supplied: dict) -> dict:
@@ -136,7 +137,10 @@ class RoleRequest:
         envelope = {**asdict(self), "permission_mode": self.permission_mode,
                     "collaboration_mode": self.collaboration_mode, "execution_mode": self.execution_mode,
                     "scratch_directory": str(self.scratch_directory)}
-        return SHARED.strip() + "\n\n" + TEMPLATES[self.role].strip() + "\n\n## Exact invocation inputs\n```json\n" + canonical_json(envelope) + "\n```\n"
+        single = self.context.get("utility_context", {}).get("evaluation_task") or (
+            len(self.context.get("canonical_evidence", {}).get("outcomes", {})) == 1)
+        protocol = "\n\n" + SINGLE_TASK.strip() if single else ""
+        return SHARED.strip() + "\n\n" + TEMPLATES[self.role].strip() + protocol + "\n\n## Exact invocation inputs\n```json\n" + canonical_json(envelope) + "\n```\n"
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -153,4 +157,4 @@ class RoleRequest:
     def library_hash(self) -> str:
         return fingerprint({"version": PROMPT_VERSION, "shared": SHARED, "templates": TEMPLATES,
                             "goal_objective": GOAL_OBJECTIVE_TEMPLATE, "context_guidance": CONTEXT_GUIDANCE,
-                            "plan_repair": PLAN_REPAIR_TEMPLATE})
+                            "plan_repair": PLAN_REPAIR_TEMPLATE, "single_task": SINGLE_TASK})

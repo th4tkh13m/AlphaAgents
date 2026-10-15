@@ -89,6 +89,9 @@ class Finalizer:
                 "evidence": list(evidence.evidence), "utility": sum(evidence.outcomes.values()) / len(self.tasks)}
 
     def run(self):
+        if self.store.config.evaluation_task:
+            from .single_task_selection import finalize_single_task
+            return finalize_single_task(self)
         frozen = self.freeze_shortlist()
         prior = self.store.db.execute("SELECT state,payload FROM finalizations WHERE id='final'").fetchone()
         if prior["state"] == "completed":
