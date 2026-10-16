@@ -185,3 +185,115 @@ def test_value_continuation_task_file_and_bundle_ids_share_permission_contract(t
         validate_response(response, bad_request, workspace)
     with pytest.raises(ValueError, match='hash mismatch'):
         role_permissions(bad_request, workspace)
+
+
+@pytest.mark.parametrize('role', ['policy', 'proposer', 'implementer'])
+def test_archive_attempt_citations_match_existing_read_scope(tmp_path, role):
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    roots = [tmp_path / 'tasks' / job / 'execution' / 'evidence' for job in ['checker', 'operator']]
+    for root in roots:
+        root.mkdir(parents=True)
+        (root / 'summary.json').write_text('{}')
+    context = {'plan_archive': {'plans': [
+        {'attempts': [{'canonical_evidence': [str(root), 'symbolic-receipt']}]} for root in roots]}}
+    request = RoleRequest(str(tmp_path), 'archive-call', role, 'artifact', 'model', 'low', context)
+    profile = role_permissions(request, workspace)
+    for root in roots:
+        assert profile['filesystem'][str(root)] == 'read'
+        _evidence([str(root / 'summary.json') + ':1'], request, workspace)
+    sibling = tmp_path / 'tasks' / 'undeclared' / 'execution' / 'evidence'
+    sibling.mkdir(parents=True)
+    (sibling / 'summary.json').write_text('{}')
+    outside = tmp_path / 'secret.json'
+    outside.write_text('{}')
+    for file in [sibling / 'summary.json', outside]:
+        with pytest.raises(ValueError, match='out-of-scope'):
+            _evidence([str(file)], request, workspace)
+    # A directory grant cannot turn symlinked or traversal citations into valid evidence.
+    (roots[0] / 'escape.json').symlink_to(outside)
+    for ref in [str(roots[0] / 'escape.json'), str(roots[0] / '..' / 'evidence' / 'summary.json')]:
+        with pytest.raises(ValueError):
+            _evidence([ref], request, workspace)
+
+
+@pytest.mark.parametrize('bad', ['external', 'symlink', 'ancestor_symlink', 'malformed', 'shape', 'missing', 'traversal'])
+def test_invalid_archive_declaration_rejected_by_citations_and_permissions(tmp_path, bad):
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+
+    run = tmp_path / 'run'
+    root = run / 'tasks' / 'job' / 'execution' / 'evidence'
+    root.mkdir(parents=True)
+    (root / 'summary.json').write_text('{}')
+    reference = str(root)
+    if bad == 'external':
+        reference = str(tmp_path)
+    elif bad == 'symlink':
+        link = root.parent / 'alias'
+        link.symlink_to(root, target_is_directory=True)
+        reference = str(link)
+    elif bad == 'ancestor_symlink':
+        link = run / 'tasks' / 'alias'
+        link.symlink_to(root.parent.parent, target_is_directory=True)
+        reference = str(link / 'execution' / 'evidence')
+    elif bad == 'shape':
+        reference = str(root.parent)
+    elif bad == 'missing':
+        reference = str(run / 'tasks' / 'absent' / 'execution' / 'evidence')
+    elif bad == 'traversal':
+        reference = str(root / '..' / 'evidence')
+    context = {'plan_archive': {'plans': [{'attempts': [{'canonical_evidence':
+               reference if bad == 'malformed' else [reference]}]}]}}
+    request = RoleRequest(str(run), 'bad-call', 'policy', 'artifact', 'model', 'low', context)
+    for check in [lambda: _evidence([str(root / 'summary.json')], request, run / 'workspace'),
+                  lambda: role_permissions(request, run / 'workspace')]:
+        with pytest.raises(ValueError):
+            check()
+
+
+def test_judge_cannot_use_archive_attempt_grants(tmp_path):
+    request, path = binding(tmp_path)
+    request.context['plan_archive'] = {'plans': [{'attempts': [{'canonical_evidence': [str(path.parent)]}]}]}
+    request.context['canonical_evidence'] = {}
+    with pytest.raises(ValueError, match='out-of-scope'):
+        _evidence([str(path)], request, tmp_path / 'workspace')
+
+
+def test_archive_exact_file_declaration_does_not_grant_its_siblings(tmp_path):
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+
+    root = tmp_path / 'tasks' / 'job' / 'execution' / 'evidence'
+    root.mkdir(parents=True)
+    declared, sibling = root / 'summary.json', root / 'trajectory.json'
+    for file in [declared, sibling]:
+        file.write_text('{}')
+    request = RoleRequest(str(tmp_path), 'file-call', 'policy', 'artifact', 'model', 'low',
+                          {'plan_archive': {'plans': [{'attempts': [{'canonical_evidence': [str(declared)]}]}]}})
+    profile = role_permissions(request, tmp_path / 'workspace')
+    assert profile['filesystem'][str(declared)] == 'read'
+    assert str(root) not in profile['filesystem']
+    _evidence([str(declared)], request, tmp_path / 'workspace')
+    with pytest.raises(ValueError, match='out-of-scope'):
+        _evidence([str(sibling)], request, tmp_path / 'workspace')
+
+
+def test_value_prior_citations_require_sealed_typed_declaration(tmp_path):
+    from alpha_agents.tree_search.core.mcts.plan_archive import freeze_continuation_evidence
+
+    payload = {'snapshot_id': 'capacity', 'prior_version': 'prior-root',
+               'reachable_subtree': [{'prior_version': 'prior-child'}],
+               'reachable_evidence': {'child': {'prior': {'id': 'prior-evidence'}}}}
+    frozen = freeze_continuation_evidence(tmp_path, payload)
+    context = {'capacity_snapshot_id': 'capacity',
+               'continuation_evidence': {**frozen, 'capacity_snapshot_id': 'capacity'},
+               'arbitrary': {'id': 'invented-id', 'prior_version': 'unsealed-prior'}}
+    request = RoleRequest(str(tmp_path), 'value', 'value', 'artifact', 'model', 'low', context)
+    _evidence(['prior-root', 'prior-child', 'prior-evidence'], request, tmp_path / 'workspace')
+    for ref in ['invented-id', 'unsealed-prior', 'prior-undeclared']:
+        with pytest.raises(ValueError, match='out-of-scope'):
+            _evidence([ref], request, tmp_path / 'workspace')
+    context['continuation_evidence']['evidence_bundle_hash'] = '0' * 64
+    with pytest.raises(ValueError, match='hash mismatch'):
+        _evidence(['prior-evidence'], request, tmp_path / 'workspace')

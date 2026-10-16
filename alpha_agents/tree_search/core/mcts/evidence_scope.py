@@ -5,6 +5,50 @@ import json
 from pathlib import Path
 
 
+def archived_task_roots(request, *, files=False):
+    """Resolve only task roots or exact files declared by archived plan attempts.
+
+    These can include diagnostics: allowing a citation does not promote a
+    diagnostic into a canonical benchmark sample. Judges retain their separate
+    canonical-only contract, and values use their sealed continuation bundle.
+    """
+    if request.role not in {"proposer", "policy", "implementer"}:
+        return []
+    roots = []
+    run = Path(request.run_id).resolve()
+    for plan in request.context.get("plan_archive", {}).get("plans", []):
+        for attempt in plan.get("attempts", []):
+            references = attempt.get("canonical_evidence", [])
+            if not isinstance(references, list) or any(not isinstance(ref, str) for ref in references):
+                raise ValueError("Archived task roots must be a list of strings")
+            for reference in references:
+                path = Path(reference)
+                if not path.is_absolute():
+                    continue  # Symbolic adapter references are not read grants.
+                if not path.is_relative_to(run):
+                    raise ValueError("Archived task root must belong to this run")
+                parts = path.relative_to(run).parts
+                if (len(parts) < 4 or parts[0] != "tasks" or parts[3] != "evidence"
+                        or ".." in path.parts or path.resolve() != path
+                        or not (path.is_dir() if len(parts) == 4 else path.is_file())):
+                    raise ValueError("Archived task reference must identify an existing canonical task evidence root or file")
+                if (path.is_file() and files) or (path.is_dir() and not files):
+                    roots.append(path)
+    return sorted(set(roots))
+
+
+def continuation_prior_ids(bundle):
+    """Typed prior identifiers from the hash-verified continuation snapshot."""
+    if bundle is None:
+        return set()
+    identifiers = {bundle.get("prior_version")}
+    identifiers.update(node.get("prior_version") for node in bundle.get("reachable_subtree", []))
+    identifiers.update(evidence.get("prior", {}).get("id")
+                       for evidence in bundle["reachable_evidence"].values()
+                       if evidence.get("prior") is not None)
+    return {identifier for identifier in identifiers if isinstance(identifier, str) and identifier}
+
+
 def continuation_bundle(request):
     if request.role != "value":
         return None

@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from alpha_agents.tree_search.core.mcts.evidence_scope import continuation_bundle, value_task_roots
+from alpha_agents.tree_search.core.mcts.evidence_scope import archived_task_roots, continuation_bundle, value_task_roots
 
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import (
     RoleRequest,
@@ -38,6 +38,7 @@ def role_permissions(request: RoleRequest, workspace: Path) -> dict:
     # Use the same declaration validation as response citations, preserving the
     # existing read scope rather than granting paths discovered inside bundles.
     value_task_roots(request)
+    archived_task_roots(request)
     continuation_bundle(request)
     workspace = workspace.resolve()
     run = Path(request.run_id).resolve()

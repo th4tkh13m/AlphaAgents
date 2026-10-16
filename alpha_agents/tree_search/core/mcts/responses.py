@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from alpha_agents.tree_search.core.mcts.contracts import finite, judge_aggregate
-from alpha_agents.tree_search.core.mcts.evidence_scope import continuation_bundle, value_task_roots
+from alpha_agents.tree_search.core.mcts.evidence_scope import (
+    archived_task_roots, continuation_bundle, continuation_prior_ids, value_task_roots,
+)
 from alpha_agents.tree_search.core.mcts.planning_scope import (
     declares_same_parent_duplicate,
 )
@@ -101,11 +103,13 @@ def _evidence(refs: Any, request: RoleRequest, workspace: Path):
     if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
         raise ValueError("Role findings require nonempty exact evidence references")
     known = _refs(request.context.get("canonical_evidence", {})) if request.role.startswith("judge_") else _refs(request.context)
-    roots = value_task_roots(request)
+    roots = value_task_roots(request) + archived_task_roots(request)
     known.update(str(path) for path in value_task_roots(request, files=True))
+    known.update(str(path) for path in archived_task_roots(request, files=True))
     bundle = continuation_bundle(request)
     if bundle is not None:
         known.update(_refs(bundle["reachable_evidence"]))
+        known.update(continuation_prior_ids(bundle))
     if not request.role.startswith("judge_"):
         known.update(f"context:{key}" for key, value in request.context.items()
                      if key.endswith("_id") and isinstance(value, str) and value)
@@ -140,7 +144,7 @@ def _evidence(refs: Any, request: RoleRequest, workspace: Path):
             if any(path.is_relative_to(directory) for directory in roots):
                 raw = Path(path_text)
                 if ".." in raw.parts or raw.resolve() != raw:
-                    raise ValueError("Value evidence path escapes its declared canonical location")
+                    raise ValueError("Evidence path escapes its declared canonical location")
                 continue
             run = Path(request.run_id).resolve()
             for reference in known:
