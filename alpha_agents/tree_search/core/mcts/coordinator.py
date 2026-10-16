@@ -18,7 +18,7 @@ from alpha_agents.tree_search.core.mcts.controller import (
     TrialExecutor,
 )
 from alpha_agents.tree_search.core.mcts.finalization import Finalizer
-from alpha_agents.tree_search.core.mcts.ports import RoleGateway, StagedEvaluator
+from alpha_agents.tree_search.core.mcts.ports import RoleGateway, StageEvidence, StagedEvaluator
 from alpha_agents.tree_search.core.mcts.recovery import reconcile_process
 from alpha_agents.tree_search.core.mcts.storage import CapacityError, TreeStore
 from alpha_agents.tree_search.core.shared.storage import write_json
@@ -87,6 +87,53 @@ class FixedPUCTCoordinator:
         with self.store.lock():
             root = self._freeze_run()
             return self._preflight(root)
+
+    def assess_root(self, *, resume=False):
+        """Measure only the root, without admitting or recovering search trials."""
+        with self.store.lock():
+            existed = self.store.db.execute("SELECT 1 FROM meta WHERE key IN ('root_pending','root')").fetchone()
+            if existed and not resume:
+                raise ValueError("Root already initialized; use resume")
+            artifact = self._freeze_run()
+            if resume:
+                self._reconcile()
+            self._preflight(artifact)
+            root = self._initialize_root(artifact, resume)
+            return asdict(self.store.score(root))
+
+    def retain_successful_root(self):
+        """Verify and export a passing single-task root; never finalize MCTS."""
+        with self.store.lock():
+            task = self.config.evaluation_task
+            if not task:
+                raise ValueError("Root-success handoff requires a single-task objective")
+            root = self.store.db.execute("SELECT value FROM meta WHERE key='root'").fetchone()
+            if root is None:
+                raise ValueError("Root-success handoff requires a scored root")
+            score = self.store.score(root[0])
+            if score.u != 1:
+                raise ValueError("Only a passing root can bypass search")
+            if self.store.db.execute("SELECT 1 FROM trials WHERE state!='completed'").fetchone() or self.store.budget()["reserved"]:
+                raise ValueError("Root handoff requires admitted work to drain")
+            row = self.store.db.execute("SELECT payload FROM evaluation_snapshots WHERE id=?", (score.u_snapshot_id,)).fetchone()
+            if row is None:
+                raise ValueError("Passing root requires its canonical observation")
+            payload = json.loads(row[0])
+            evidence = StageEvidence(payload["artifact_id"], payload["stage"], payload["outcomes"], tuple(payload["evidence"]))
+            evidence.validate_tasks((task,))
+            if evidence.artifact_id != score.artifact_id or evidence.identity != score.u_snapshot_id or evidence.outcomes != {task: True}:
+                raise ValueError("Passing root must match its canonical observation")
+            self.evaluator.verify_stage(evidence)
+            finalizer = Finalizer(self.store, self.artifacts, self._evaluator("root-handoff"),
+                                  self.selection_tasks, self.subset, self.runtime_identity)
+            finalizer.export(score.artifact_id, self.directory / "winner", provisional=False)
+            result = {"selection_status": "completed", "selection_mode": "passing-root-no-search",
+                      "search_skipped": True, "task": task, "winner": {"artifact_id": score.artifact_id, "score": asdict(score)},
+                      "selected_actions": [], "completed_rollouts": self.store.db.execute("SELECT count(*) FROM backups").fetchone()[0],
+                      "configured_rollouts": self.config.max_trials, "confirmed": False,
+                      "reason": "Fresh canonical root already succeeds on this task"}
+            write_json(self.directory / "root_handoff.json", result)
+            return result
 
     def _preflight(self, root):
         checks = {"root_artifact_id": root, "controller_type": "fixed_puct"}

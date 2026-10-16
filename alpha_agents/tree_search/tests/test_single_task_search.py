@@ -238,3 +238,123 @@ def test_sequence_rejects_non_boolean_cache_reuse_policy(tmp_path):
     from alpha_agents.tree_search.composition import build_sequence
     with pytest.raises(ValueError, match='reuse_cached_root_results must be a boolean'):
         build_sequence({'sequence': {'reuse_cached_root_results': 'false'}}, tmp_path)
+
+
+def passing_root_coordinator(tmp_path, value=1):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'controller.py').write_text(f'value = {value}\n')
+    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', max_trials=1)
+    gateway, evaluator = Gateway(), Evaluator()
+    search = FixedPUCTCoordinator(source, tmp_path / 'tree', config, Objective('single', 'rubric', 'judge'),
+        gateway, evaluator, RoleSettings('configured-model', 'low'), (), {'Task': 1.0}, ('Task',), {})
+    return search, gateway, evaluator
+
+
+def test_root_gate_measures_once_exports_exact_passing_root_and_never_finalizes_search(tmp_path):
+    search, gateway, evaluator = passing_root_coordinator(tmp_path)
+    try:
+        root = search.assess_root()
+        assert root['u'] == 1
+        assert search.store.db.execute('SELECT count(*) FROM trials').fetchone()[0] == 0
+        handoff = search.retain_successful_root()
+        assert handoff['search_skipped'] is True and handoff['completed_rollouts'] == 0
+        assert handoff['winner']['artifact_id'] == root['artifact_id']
+        assert (search.directory / 'winner/controller.py').read_text() == 'value = 1\n'
+        assert search.store.db.execute('SELECT count(*) FROM finalizations').fetchone()[0] == 0
+        assert all(request.role.startswith('judge_') for request in gateway.calls)
+        calls = len(gateway.calls), len(evaluator.calls)
+        assert search.assess_root(resume=True) == root
+        assert search.retain_successful_root() == handoff
+        assert calls == (len(gateway.calls), len(evaluator.calls))
+    finally:
+        search.close()
+
+
+def test_root_gate_rejects_failure_pending_trials_and_unverifiable_evidence(tmp_path, monkeypatch):
+    search, _, evaluator = passing_root_coordinator(tmp_path)
+    try:
+        search.assess_root()
+        monkeypatch.setattr(evaluator, 'verify_stage', lambda _: (_ for _ in ()).throw(RuntimeError('missing evidence')))
+        with pytest.raises(RuntimeError, match='missing evidence'):
+            search.retain_successful_root()
+        assert not (search.directory / 'winner').exists()
+        assert not (search.directory / 'root_handoff.json').exists()
+        monkeypatch.setattr(evaluator, 'verify_stage', lambda _: None)
+        search.store.reserve_trial()
+        with pytest.raises(ValueError, match='admitted work'):
+            search.retain_successful_root()
+    finally:
+        search.close()
+    failed_dir = tmp_path / 'failed'
+    failed_dir.mkdir()
+    search, _, _ = passing_root_coordinator(failed_dir, value=0)
+    try:
+        assert search.assess_root()['u'] == 0
+        with pytest.raises(ValueError, match='passing root'):
+            search.retain_successful_root()
+    finally:
+        search.close()
+
+
+class RootGateApplication(Application):
+    def __init__(self, source, directory, task, seen, assessments):
+        super().__init__(source, directory, task, seen)
+        self.assessments = assessments
+
+    def assess_root(self, *, resume=False):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / 'run_configuration.json').write_text('{}')
+        self.assessments.append((self.task, (self.source / 'controller.py').read_text()))
+        return {'u': 1 if self.task == 'TaskA' else 0}
+
+    def retain_successful_root(self):
+        winner = self.directory / 'winner'
+        winner.mkdir(exist_ok=True)
+        (winner / 'controller.py').write_text((self.source / 'controller.py').read_text())
+        return {'selection_status': 'completed', 'search_skipped': True,
+                'selection_mode': 'passing-root-no-search', 'reason': 'Fresh root succeeds',
+                'winner': {'artifact_id': 'unchanged-root'}, 'selected_actions': [], 'completed_rollouts': 0}
+
+
+def test_sequence_skips_passing_root_but_searches_failed_root_and_resumes_exact_handoff(tmp_path):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'controller.py').write_text('root')
+    seen, assessed = [], []
+    factory = lambda task, index, harness, directory: RootGateApplication(harness, directory, task, seen, assessed)
+    sequence = TaskSequence(tmp_path / 'sequence', source, ['TaskA', 'TaskB'], {}, factory, skip_successful_roots=True)
+    state = sequence.run()
+    assert state['state'] == 'completed'
+    assert state['steps'][0]['search_skipped'] is True
+    assert state['steps'][0]['completed_rollouts'] == 0
+    assert not state['steps'][1].get('search_skipped')
+    assert assessed == [('TaskA', 'root'), ('TaskB', 'root')]
+    assert seen == [('TaskB', 'root')]
+    assert sequence.run(resume=True) == state
+    assert seen == [('TaskB', 'root')]
+
+
+def test_root_skip_policy_migration_is_explicit_narrow_audited_and_idempotent(tmp_path):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'controller.py').write_text('root')
+    seen, assessed = [], []
+    old_config = {'seed': 42, 'sequence': {}}
+    old = TaskSequence(tmp_path / 'sequence', source, ['TaskA'], old_config,
+                       lambda task, index, harness, directory: Application(harness, directory, task, seen, pending=True))
+    assert old.run()['state'] == 'recovery_pending'
+    new_config = {'seed': 42, 'sequence': {'skip_successful_roots': True}}
+    new = TaskSequence(old.directory, source, ['TaskA'], new_config,
+                       lambda task, index, harness, directory: RootGateApplication(harness, directory, task, seen, assessed),
+                       skip_successful_roots=True)
+    with pytest.raises(ValueError, match='identity changed'):
+        new.run(resume=True)
+    before = (old.directory / 'sequence.json').read_bytes()
+    with pytest.raises(ValueError, match='other configuration'):
+        new.migrate_root_skip_policy({'seed': 43, 'sequence': {}}, 'Not an authorized seed change')
+    assert (old.directory / 'sequence.json').read_bytes() == before
+    state = new.migrate_root_skip_policy(old_config, 'User opted to skip freshly passing roots')
+    assert len(state['identity_migrations']) == 1
+    assert new.migrate_root_skip_policy(old_config, 'Same approved policy') == state
+    assert new.run(resume=True)['steps'][0]['search_skipped'] is True

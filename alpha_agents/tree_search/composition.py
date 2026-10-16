@@ -61,6 +61,14 @@ class SearchApplication:
             self.profiler.start()
         return self.coordinator.preflight()
 
+    def assess_root(self, **kwargs):
+        if self.profiler is not None:
+            self.profiler.start()
+        return self.coordinator.assess_root(**kwargs)
+
+    def retain_successful_root(self):
+        return self.coordinator.retain_successful_root()
+
     def run(self, **kwargs):
         if self.profiler is not None:
             self.profiler.start()
@@ -228,6 +236,9 @@ def build_sequence(config, output):
     reuse_results = config["sequence"].get("reuse_cached_root_results", True)
     if not isinstance(reuse_results, bool):
         raise ValueError("reuse_cached_root_results must be a boolean")
+    skip_passing = config["sequence"].get("skip_successful_roots", False)
+    if not isinstance(skip_passing, bool):
+        raise ValueError("skip_successful_roots must be a boolean")
     index = root_receipts(config["sequence"]["cached_root_run"])
     tasks = index["failed_tasks"]
     manifest = json.loads(Path(config["evaluation"]["manifest"]).read_text())
@@ -267,4 +278,5 @@ def build_sequence(config, output):
             raise
 
     from alpha_agents.tree_search.infrastructure.sequence_monitor import SequenceMonitor
-    return TaskSequence(output, source, tasks, config, application, monitor=SequenceMonitor(output))
+    return TaskSequence(output, source, tasks, config, application, monitor=SequenceMonitor(output),
+                        skip_successful_roots=skip_passing)

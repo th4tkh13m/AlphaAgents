@@ -31,7 +31,10 @@ class SequenceMonitor:
                  "Elapsed review, device execution, queues, and model calls may overlap; do not sum their durations.", "",
                  "| Task | State | Tree |", "| --- | --- | --- |"]
         for step in state["steps"]:
-            lines.append(f"| {step['task']} | {step['state']} | [{step['directory']}]({step['directory']}) |")
+            status = step["state"] + (" (root passed; search skipped)" if step.get("search_skipped") else "")
+            lines.append(f"| {step['task']} | {status} | [{step['directory']}]({step['directory']}) |")
+        if state.get("root_success_policy"):
+            lines += ["", "Fresh passing roots bypass MCTS and carry the exact root forward. Only failed roots receive 30 rollouts; skips do not invent rollout completions."]
         errors = []
         for step in state["steps"]:
             if step["state"] not in {"running", "recovery_pending"}:
