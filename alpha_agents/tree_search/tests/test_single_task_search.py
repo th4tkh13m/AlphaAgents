@@ -189,3 +189,52 @@ def test_single_task_winner_verifies_cached_evidence_before_freezing_choice(tmp_
         assert finalizer.run() == final
     finally:
         store.close()
+
+
+@pytest.mark.parametrize('reuse', [None, True, False])
+def test_sequence_can_use_cached_failed_task_list_without_importing_old_outcomes(tmp_path, monkeypatch, reuse):
+    from types import SimpleNamespace
+    from alpha_agents.tree_search import composition
+    from alpha_agents.tree_search.bridges.androidworld import sequence_cache
+    from alpha_agents.tree_search.core.mcts.artifacts import manifest
+    from alpha_agents.tree_search.core.mcts.contracts import fingerprint
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'harness.py').write_text('unchanged = True\n')
+    task_manifest = tmp_path / 'manifest.json'
+    task_manifest.write_text(json.dumps({'rows': [{'task': 'TaskA', 'stage': 'selection'}]}))
+    index = {'failed_tasks': ['TaskA'], 'artifact_id': fingerprint(manifest(source)), 'receipts': {}}
+    imported, constructed = [], []
+    monkeypatch.setattr(sequence_cache, 'root_receipts', lambda _: index)
+    monkeypatch.setattr(sequence_cache, 'import_root_receipt', lambda *args: imported.append(args))
+
+    def make_application(settings, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        constructed.append(settings)
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(composition, 'build', make_application)
+    sequence_config = {'cached_root_run': str(tmp_path / 'cached')}
+    if reuse is not None:
+        sequence_config['reuse_cached_root_results'] = reuse
+    settings = {'sequence': sequence_config, 'controller': {},
+                'harness': {'source': str(source), 'config': {'androidworld_devices': ['a', 'b', 'c', 'd']}},
+                'evaluation': {'manifest': str(task_manifest)}}
+    output = tmp_path / 'sequence'
+    sequence = composition.build_sequence(settings, output)
+    assert sequence.tasks == ['TaskA']
+    directory = output / 'tasks/01-TaskA'
+    sequence.application_factory('TaskA', 0, source, directory)
+    assert len(imported) == (0 if reuse is False else 1)
+    assert constructed[0]['controller']['evaluation_task'] == 'TaskA'
+    assert constructed[0]['controller']['max_trials'] == 30
+    assert constructed[0]['controller']['max_depth'] == 8
+    context = json.loads((directory / 'task_sequence_context.json').read_text())
+    assert context['reuse_cached_root_results'] is (reuse is not False)
+
+
+def test_sequence_rejects_non_boolean_cache_reuse_policy(tmp_path):
+    from alpha_agents.tree_search.composition import build_sequence
+    with pytest.raises(ValueError, match='reuse_cached_root_results must be a boolean'):
+        build_sequence({'sequence': {'reuse_cached_root_results': 'false'}}, tmp_path)

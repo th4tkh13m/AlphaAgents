@@ -225,6 +225,9 @@ def build_sequence(config, output):
     from alpha_agents.tree_search.core.mcts.task_sequence import TaskSequence
     from alpha_agents.tree_search.core.shared.storage import write_json
 
+    reuse_results = config["sequence"].get("reuse_cached_root_results", True)
+    if not isinstance(reuse_results, bool):
+        raise ValueError("reuse_cached_root_results must be a boolean")
     index = root_receipts(config["sequence"]["cached_root_run"])
     tasks = index["failed_tasks"]
     manifest = json.loads(Path(config["evaluation"]["manifest"]).read_text())
@@ -253,9 +256,11 @@ def build_sequence(config, output):
         settings["harness"]["source"] = str(harness_source)
         app = build(settings, directory)
         try:
-            import_root_receipt(app, index, task)
+            if reuse_results:
+                import_root_receipt(app, index, task)
             write_json(directory / "task_sequence_context.json", {"task": task, "position": position,
-                       "source_harness": str(harness_source), "cached_root_index": str(output / "cached_root_index.json")})
+                       "source_harness": str(harness_source), "cached_root_index": str(output / "cached_root_index.json"),
+                       "reuse_cached_root_results": reuse_results})
             return app
         except BaseException:
             app.close()
