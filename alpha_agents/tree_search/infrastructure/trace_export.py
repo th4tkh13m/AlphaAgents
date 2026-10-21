@@ -508,6 +508,7 @@ def snapshot(run, now, samples, configured_devices=(), fallback_start=None):
             ("Code review", "code_start", "code_finish"),
             ("Android evaluation/cache", "android_start", "android_finish"),
             ("Trajectory review", "execution_start", "execution_finish"),
+            ("Engineering review", "review_start", "review_finish"),
         ]:
             if start_key not in events:
                 continue
@@ -517,6 +518,7 @@ def snapshot(run, now, samples, configured_devices=(), fallback_start=None):
                     "Code review": 1,
                     "Android evaluation/cache": 2,
                     "Trajectory review": 3,
+                    "Engineering review": 4,
                 }[phase]
             )
             trace.track(

@@ -14,7 +14,8 @@ from alpha_agents.tree_search.bridges.androidworld.staged_evaluator import (
     EvaluationRevision,
     StagedArtemisEvaluator,
 )
-from alpha_agents.tree_search.core.mcts.artifacts import ArtifactStore, manifest as artifact_manifest
+from alpha_agents.tree_search.core.mcts.artifacts import ArtifactStore
+from alpha_agents.tree_search.core.mcts.artifacts import manifest as artifact_manifest
 from alpha_agents.tree_search.core.mcts.contracts import (
     ARTIFACT_RUBRIC_VERSION,
     FixedPUCTConfig,
@@ -25,6 +26,7 @@ from alpha_agents.tree_search.core.mcts.controller import (
     JUDGE_COVERAGE_POLICY,
 )
 from alpha_agents.tree_search.core.mcts.coordinator import FixedPUCTCoordinator
+from alpha_agents.tree_search.core.mcts.judge_review import SCORING_CONTRACT
 from alpha_agents.tree_search.core.mcts.ports import RoleSettings
 from alpha_agents.tree_search.core.mcts.task_cache import TaskCache
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.codex import (
@@ -132,10 +134,13 @@ def trusted_runner_revision(androidworld_revision, source_attestation=None):
         runtime_attestation,
         staged_evaluator,
     )
-    from alpha_agents.tree_search.core.mcts import task_cache
+    from alpha_agents.tree_search.core.mcts import resource_retention, task_cache
+    from alpha_agents.tree_search.infrastructure import evidence_sqlite, sqlite_snapshot
 
     root = Path(artemis.__file__).parent
-    adapters = {"evaluator.py": staged_evaluator, "task_cache.py": task_cache, "runtime_attestation.py": runtime_attestation}
+    adapters = {"evaluator.py": staged_evaluator, "task_cache.py": task_cache, "runtime_attestation.py": runtime_attestation,
+                "evidence_sqlite.py": evidence_sqlite, "sqlite_snapshot.py": sqlite_snapshot,
+                "resource_retention.py": resource_retention}
     files = ("artemis.py", "artemis_runner.py", "runtime_limits.py", "device_preflight.py", "fixture_preflight.py",
              "task_outcomes.py", "answer_handoff.py", "phase_watch.py", "model_health.py", "memory_compat.py",
              "device_recovery.py", "device_maintenance.py")
@@ -189,7 +194,7 @@ def build(config, output):
                                   evaluation["fixture_identity"])
     library = RoleRequest("identity", "identity", "proposer", "identity", roles.model, roles.effort, {}).library_hash
     objective = Objective(subset["manifest_id"], ARTIFACT_RUBRIC_VERSION, fingerprint({"roles": asdict(roles),
-        "prompt_library": library, "coverage": JUDGE_COVERAGE_POLICY, "unknown_dimension": .5}),
+        "prompt_library": library, "coverage": JUDGE_COVERAGE_POLICY, "scoring": SCORING_CONTRACT}),
         evaluation.get("judge_weight", .1))
     source, output = Path(config["harness"]["source"]), Path(output).resolve()
     if output.is_relative_to(source.resolve()):
@@ -229,48 +234,97 @@ def build(config, output):
 
 
 def build_sequence(config, output):
-    from alpha_agents.tree_search.bridges.androidworld.sequence_cache import import_root_receipt, root_receipts
+    from alpha_agents.tree_search.bridges.androidworld.sequence_cache import (
+        import_root_receipt,
+        root_receipts,
+    )
     from alpha_agents.tree_search.core.mcts.task_sequence import TaskSequence
     from alpha_agents.tree_search.core.shared.storage import write_json
 
-    reuse_results = config["sequence"].get("reuse_cached_root_results", True)
+    sequence = config["sequence"]
+    scope = sequence.get("task_scope", "cached_failures")
+    if scope not in {"cached_failures", "all_development"}:
+        raise ValueError("task_scope must be cached_failures or all_development")
+    reuse_results = sequence.get("reuse_cached_root_results", scope == "cached_failures")
     if not isinstance(reuse_results, bool):
         raise ValueError("reuse_cached_root_results must be a boolean")
     skip_passing = config["sequence"].get("skip_successful_roots", False)
     if not isinstance(skip_passing, bool):
         raise ValueError("skip_successful_roots must be a boolean")
-    index = root_receipts(config["sequence"]["cached_root_run"])
-    tasks = index["failed_tasks"]
     manifest = json.loads(Path(config["evaluation"]["manifest"]).read_text())
-    development = {row["task"] for row in manifest["rows"] if row["stage"].lower() in {"screen", "selection"}}
+    rows = [row for row in manifest["rows"] if row["stage"].lower() in {"screen", "selection"}]
+    development = {row["task"] for row in rows}
+    index = None
+    if scope == "all_development":
+        if reuse_results:
+            raise ValueError("all_development requires fresh root evaluations, not cached outcome reuse")
+        if sequence.get("order", "difficulty_then_human_steps") != "difficulty_then_human_steps":
+            raise ValueError("all_development requires difficulty_then_human_steps ordering")
+        levels = {"easy": 0, "medium": 1, "hard": 2}
+        if len(rows) != len(development) or not rows:
+            raise ValueError("Development tasks must be nonempty and unique")
+        for row in rows:
+            if (row.get("difficulty") not in levels or type(row.get("optimal_human_steps")) is not int
+                    or row["optimal_human_steps"] <= 0):
+                raise ValueError("Difficulty ordering requires known difficulty and positive optimal_human_steps")
+        rows.sort(key=lambda row: (levels[row["difficulty"]], row["optimal_human_steps"], row["task"]))
+        tasks = [row["task"] for row in rows]
+        expected = sequence.get("expected_task_count", len(tasks))
+        if type(expected) is not int or expected != len(tasks):
+            raise ValueError("Development task count differs from expected_task_count")
+    else:
+        index = root_receipts(sequence["cached_root_run"])
+        tasks = index["failed_tasks"]
+    if not tasks:
+        raise ValueError("Sequence requires at least one task")
     if not set(tasks) <= development:
         raise ValueError("Cached failures contain an unknown or protected task")
     if len(config["harness"]["config"]["androidworld_devices"]) != 4:
         raise ValueError("The sequential experiment requires exactly four emulators")
     source = Path(config["harness"]["source"])
-    if fingerprint(artifact_manifest(source)) != index["artifact_id"]:
+    if index and fingerprint(artifact_manifest(source)) != index["artifact_id"]:
         raise ValueError("Sequence source must be the cached root harness")
     output = Path(output)
-    index_path = output / "cached_root_index.json"
-    if index_path.exists():
-        if json.loads(index_path.read_text()) != index:
-            raise ValueError("Cached-root receipt index changed; use a new sequence directory")
-    else:
-        write_json(index_path, index)
+    if index:
+        index_path = output / "cached_root_index.json"
+        if index_path.exists():
+            if json.loads(index_path.read_text()) != index:
+                raise ValueError("Cached-root receipt index changed; use a new sequence directory")
+        else:
+            write_json(index_path, index)
+    if scope == "all_development":
+        order = {"scope": scope, "order": "difficulty_then_human_steps",
+                 "tasks": [{key: row[key] for key in ("task", "stage", "difficulty", "optimal_human_steps")} for row in rows]}
+        order_path = output / "task_order.json"
+        if order_path.exists() and json.loads(order_path.read_text()) != order:
+            raise ValueError("Frozen development task order changed; use a new sequence directory")
+        write_json(order_path, order)
+
+    # Honor the experiment's limits; do not silently restore the old 3x3/depth-8
+    # defaults inside every task factory.
+    controller = dict(config["controller"])
+    controller.update(type="fixed_puct", device_limit=4)
+    for key, value in {"max_depth": 8, "max_trials": 30, "max_plans": 3, "max_implementations": 3}.items():
+        controller.setdefault(key, value)
+    controller.setdefault("max_new_attempts_per_trial", controller["max_depth"])
+    controller.setdefault("max_attempts", controller["max_trials"] * controller["max_new_attempts_per_trial"])
+    # Validate before constructing any device scheduler or role runtime.
+    FixedPUCTConfig.from_mapping({**{key: value for key, value in controller.items() if key != "type"},
+                                  "evaluation_task": tasks[0]})
 
     def application(task, position, harness_source, directory):
         settings = json.loads(json.dumps(config))
         settings.pop("sequence")
-        settings["controller"].update(type="fixed_puct", evaluation_task=task, max_depth=8,
-                                      max_trials=30, max_new_attempts_per_trial=8, max_attempts=240,
-                                      max_plans=3, max_implementations=3, device_limit=4)
+        settings["controller"] = {**controller, "evaluation_task": task}
         settings["harness"]["source"] = str(harness_source)
         app = build(settings, directory)
         try:
             if reuse_results:
                 import_root_receipt(app, index, task)
             write_json(directory / "task_sequence_context.json", {"task": task, "position": position,
-                       "source_harness": str(harness_source), "cached_root_index": str(output / "cached_root_index.json"),
+                       "source_harness": str(harness_source), "task_scope": scope,
+                       "task_order": str(output / "task_order.json") if scope == "all_development" else None,
+                       "cached_root_index": str(output / "cached_root_index.json") if index else None,
                        "reuse_cached_root_results": reuse_results})
             return app
         except BaseException:

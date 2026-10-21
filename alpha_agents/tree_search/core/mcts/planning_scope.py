@@ -16,7 +16,8 @@ def declares_same_parent_duplicate(candidate):
 
 
 def verification_scope_contract():
-    return {"version": "test-edit-scope-v1"}
+    return {"version": "candidate-harness-edits-v2", "file_allowlist": False,
+            "legacy_scope": "Informational only; no path-based admission restriction"}
 
 
 def novelty_admission_contract():

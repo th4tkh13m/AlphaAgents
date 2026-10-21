@@ -59,7 +59,7 @@ class LocalAgent(RoleAdapter):
         self.lock = threading.Lock()
 
     def invoke(self, request, workspace):
-        if request.role in {"proposer", "policy"}:
+        if request.role == "policy":
             assert request.context["discount_factor"] == .9
             assert request.context["continuation_policy_id"] == fingerprint(request.context["continuation_policy"])
         if request.role.startswith("judge_"):
@@ -70,17 +70,20 @@ class LocalAgent(RoleAdapter):
         context, role = request.context, request.role
         result = {"artifact_id": request.artifact_id}
         if role == "proposer":
-            result["plans"] = [{
-                "id": f"increment-{i}", "document": f"Implement bounded increment {i}.",
-                "intervention": {"target": "controller", "operation": "increment",
-                    "conditions": "verified observation", "parameters": {"amount": i + 1},
-                    "scope": ["controller.py"], "mechanism": f"increment {i} at {request.artifact_id}"},
-                "novelty_status": "new_action", "novelty": "Distinct bounded state update",
-                "diversity_audit": "Compared all update amounts", "closest_plan_ids": [],
-                "evidence": ["controller.py"],
-            } for i in range(3)]
-            catalog = context["plan_archive"]["plan_ids"]
-            result["archive_review"] = {"catalog_plan_ids": catalog, "inspected_plan_ids": catalog, "gaps": []}
+            from alpha_agents.tree_search.core.mcts.design_documents import (
+                FORMAT,
+                SECTIONS,
+            )
+            slot = context["proposal_slot"]
+            metadata = {"id": f"increment-{slot}", "title": f"Increment {slot}",
+                        "summary": "Implement the specified state update.",
+                        "intervention": {"target": "controller.py", "operation": f"update-{slot}",
+                                         "conditions": "Verified state", "mechanism": f"state-update-{slot}"},
+                        "expected_benefit": "Improve completion.", "validation": "Check the state update.",
+                        "risks_and_limitations": "Limited coverage.", "evidence": ["controller.py"]}
+            document = f'# {metadata["title"]}\n```json\n{json.dumps(metadata)}\n```\n'
+            document += "\n".join(f"## {heading}\nConcrete design specification.\n" for heading in SECTIONS)
+            result.update(plan_format=FORMAT, plans=[{**metadata, "document": document}])
         elif role == "policy":
             ids = [plan["id"] for plan in context["plans"]]
             result.update(priors={id: 1 for id in ids}, plan_ids=ids,
@@ -93,6 +96,9 @@ class LocalAgent(RoleAdapter):
             result.update(status="completed", plan_id=context["plan_id"], attempt_id=context["attempt_id"],
                 changes=["Increment state"], blockers=[], evidence=["controller.py"],
                 verification=[{"ran": True, "status": "completed", "evidence": ["controller.py"]}])
+        elif role == "judge_review":
+            from alpha_agents.tree_search.tests.judge_fixtures import review_payload
+            return review_payload(request.artifact_id, context["canonical_evidence"]["snapshot_id"], context["rubric"])
         elif role.startswith("judge_"):
             result.update(status="completed", phase="code" if role == "judge_code" else "execution",
                 rubric_version=context["rubric"], findings=["Inspected state update"],
@@ -103,10 +109,8 @@ class LocalAgent(RoleAdapter):
                         "confidence": "high", "evidence": ["controller.py"]}
                         for dimension in ("robustness", "decisions", "generalizable")})
         elif role == "value":
-            result.update(status="completed", value=0, score_snapshot_id=context["score_snapshot_id"],
-                capacity_snapshot_id=context["capacity_snapshot_id"], objective_id=context["objective_id"],
-                discount_factor=context["discount_factor"], continuation_policy_id=context["continuation_policy_id"], rationale="No further predicted gain",
-                uncertainty="Local fixture", evidence=["controller.py"])
+            from alpha_agents.tree_search.tests.value_fixtures import forecast_payload
+            return forecast_payload(context, request.artifact_id)
         return result
 
 
@@ -261,7 +265,7 @@ def test_codex_context_and_request_binding_match_previous_protocol(tmp_path, pre
     tools = runtime.implementation_tools_context()
     common = {"version": "continuation-role-protocol-v1", "model": "model", "effort": "low",
               "invocation_deadline_seconds": 7200, "verification_scope_contract": {}, "novelty_admission_contract": {}}
-    before = {"continuation_role_protocol": {**common, "proposer_mode": "native_plan", "implementer_mode": "native_goal",
+    before = {"continuation_role_protocol": {**common, "proposer_mode": "native_goal", "implementer_mode": "native_goal",
         "implementation_verification": {"prepared_environment_configured": bool(tools), **tools}}}
     after = gateway.enrich_context("value", {"continuation_role_protocol": common})
     assert after == before

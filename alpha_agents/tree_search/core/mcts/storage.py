@@ -38,6 +38,17 @@ from alpha_agents.tree_search.core.mcts.planning_scope import (
     declares_same_parent_duplicate,
 )
 from alpha_agents.tree_search.core.mcts.policy import Edge, prepare_priors, select_edge
+from alpha_agents.tree_search.core.mcts.success_stop import (
+    VERSION as SUCCESS_STOP_VERSION,
+)
+from alpha_agents.tree_search.core.mcts.success_stop import (
+    enabled as success_stop_enabled,
+)
+from alpha_agents.tree_search.core.mcts.success_stop import (
+    qualifying_success,
+    record_success,
+    stop_receipt,
+)
 from alpha_agents.tree_search.core.shared.storage import run_lock
 
 
@@ -86,6 +97,9 @@ CREATE TABLE IF NOT EXISTS attempts(
  state TEXT NOT NULL, child TEXT REFERENCES nodes(id), error TEXT,
  n INTEGER NOT NULL DEFAULT 0, w REAL NOT NULL DEFAULT 0,
  UNIQUE(plan, slot)
+);
+CREATE TABLE IF NOT EXISTS implementation_reports(
+ attempt TEXT PRIMARY KEY REFERENCES attempts(id), payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS selections(
  trial TEXT NOT NULL REFERENCES trials(id), position INTEGER NOT NULL,
@@ -398,7 +412,7 @@ class TreeStore:
         plans = [dict(row) for row in self.db.execute(
             "SELECT id,node,n,w,CASE WHEN n=0 THEN 0 ELSE w/n END AS q FROM plans ORDER BY id")]
         lifecycle = {row[0]: json.loads(row[1]) for row in self.db.execute(
-            "SELECT key,value FROM meta WHERE key IN ('root_state','search_state')")}
+            "SELECT key,value FROM meta WHERE key IN ('root_state','search_state','task_success_stop')")}
         final = self.db.execute("SELECT state FROM finalizations WHERE id='final'").fetchone()
         lifecycle["finalization"] = final[0] if final else "not_started"
         has_task_recovery = self.db.execute(
@@ -473,8 +487,16 @@ class TreeStore:
             return deficits
 
     def save_judge(self, artifact: str, canonical_id: str, payload: dict):
+        from alpha_agents.tree_search.core.mcts.judge_review import (
+            CRITERIA,
+            RUBRIC_VERSION,
+            review_score,
+        )
+        unified = self.objective.rubric_version == RUBRIC_VERSION or set(payload.get("dimensions", {})) == set(CRITERIA)
+        if unified:
+            review_score(payload)
         if (payload.get("artifact_id") != artifact or payload.get("canonical_evidence_id") != canonical_id or
-            payload.get("phase") != "execution" or payload.get("rubric_version") != self.objective.rubric_version):
+            (not unified and payload.get("phase") != "execution") or payload.get("rubric_version") != self.objective.rubric_version):
             raise ValueError("Judge snapshot must identify its exact canonical artifact evidence and rubric")
         id = fingerprint(payload)
         with self.transaction():
@@ -497,25 +519,38 @@ class TreeStore:
             raise ValueError("Narrative review requires an explanation and manual provenance")
         original = self._row("judge_snapshots", judge_id)
         call = self._row("invocations", invocation)
-        if call["purpose"] != "judge_execution":
+        unified = original["rubric"] == "artifact-quality-rubric-v3" or "correctness" in json.loads(original["payload"])["dimensions"]
+        judge_role = "judge_review" if unified else "judge_execution"
+        if call["purpose"] != judge_role:
             raise ValueError("Narrative review requires a metered execution judge")
         directory = self.directory / "role_requests" / invocation
         request = json.loads((directory / "request.json").read_text())
         payload = json.loads((directory / "response.json").read_text())
         before = json.loads(original["payload"])
-        if (request.get("role") != "judge_execution" or request.get("artifact_id") != original["artifact"] or
-                payload.get("status") != "completed" or payload.get("phase") != "execution" or
+        if (request.get("role") != judge_role or request.get("artifact_id") != original["artifact"] or
+                payload.get("status") != "completed" or (not unified and payload.get("phase") != "execution") or
                 payload.get("artifact_id") != original["artifact"] or
                 payload.get("canonical_evidence_id") != original["canonical_id"] or
                 payload.get("rubric_version") != original["rubric"]):
             raise ValueError("Reviewed response must identify the same completed canonical assessment")
-        expected = {"robustness", "decisions", "generalizable"}
-        if set(payload.get("dimensions", {})) != expected or set(before.get("dimensions", {})) != expected:
-            raise ValueError("Narrative review requires all original dimensions")
-        judge_aggregate(payload["dimensions"])
-        for name in expected:
-            if payload["dimensions"][name].get("score") != before["dimensions"][name].get("score"):
-                raise ValueError("Narrative review cannot change dimension scores or unknown status")
+        if unified:
+            from alpha_agents.tree_search.core.mcts.judge_review import review_score
+            review_score(payload)
+            for name, group in before["dimensions"].items():
+                for criterion, item in group.items():
+                    after = payload["dimensions"][name][criterion]
+                    if any(item[key] != after[key] for key in ("score", "assessment")):
+                        raise ValueError("Narrative review cannot change criterion scores or assessment states")
+            if before["integrity"]["controller_flag"] != payload["integrity"]["controller_flag"]:
+                raise ValueError("Narrative review cannot change integrity scoring")
+        else:
+            expected = {"robustness", "decisions", "generalizable"}
+            if set(payload.get("dimensions", {})) != expected or set(before.get("dimensions", {})) != expected:
+                raise ValueError("Narrative review requires all original dimensions")
+            judge_aggregate(payload["dimensions"])
+            for name in expected:
+                if payload["dimensions"][name].get("score") != before["dimensions"][name].get("score"):
+                    raise ValueError("Narrative review cannot change dimension scores or unknown status")
         record = {"judge_id": judge_id, "invocation": invocation, "payload": payload,
                   "reason": reason, "provenance": provenance}
         id = fingerprint(record)
@@ -576,6 +611,8 @@ class TreeStore:
 
     def reserve_trial(self) -> str:
         with self.transaction():
+            if stop_receipt(self):
+                raise CapacityError("Qualified single-task success has stopped new trial admission")
             count = self.db.execute("SELECT count(*) FROM trials").fetchone()[0]
             if count >= self.config.max_trials:
                 raise CapacityError("Trial limit reached")
@@ -590,7 +627,8 @@ class TreeStore:
             self.db.execute("INSERT INTO trials VALUES(?,'active',?,?,NULL)", (id, count + 1, root[0]))
             return id
 
-    def claim_operation(self, node: str, kind: str, owner: str, evidence: str, now: float | None = None):
+    def claim_operation(self, node: str, kind: str, owner: str, evidence: str, now: float | None = None,
+                        proposal_calls: int = 2):
         if kind not in {"expansion", "refresh"}:
             raise ValueError("Unknown node operation")
         with self.transaction():
@@ -599,9 +637,9 @@ class TreeStore:
                 raise ValueError("Ineligible expansion/refresh node")
             if kind == "expansion" and n["closed"]:
                 return None
-            # Proposal diversity depends on the complete shared plan archive.
-            # Hold its publication reservation through proposal and policy work;
-            # another node may still implement, evaluate, or refresh priors.
+            # Keep one owned expansion publication at a time while other nodes
+            # may still implement, evaluate, or refresh priors. Legacy archive
+            # publications share the same fencing protocol.
             # The existing heartbeat/fencing/reclaim protocol also owns this
             # reservation, so a crash cannot leave an untracked mutex behind.
             if kind == "expansion" and self.db.execute(
@@ -619,7 +657,7 @@ class TreeStore:
                 return None
             token = old["token"] + 1 if old else 1
             request = self._id("operation")
-            self._reserve(request, {"proposal": 2, "policy": 2} if kind == "expansion" else {"policy": 2})
+            self._reserve(request, {"proposal": proposal_calls, "policy": 2} if kind == "expansion" else {"policy": 2})
             self.db.execute("INSERT OR REPLACE INTO operations VALUES(?,?,?,?,?,?,?,1)",
                             (node, kind, owner, token, time.time() if now is None else now, request, evidence))
             return dict(self.db.execute("SELECT * FROM operations WHERE node=?", (node,)).fetchone())
@@ -661,12 +699,24 @@ class TreeStore:
             self.db.execute("UPDATE operations SET active=0, token=token+1 WHERE node=?", (node,))
 
     def publish_plans(self, node: str, owner: str, token: int, drafts: list[dict], raw: dict[str, float],
-                      archive_review: dict, zero_reason: str | None = None,
+                      archive_review: dict | None = None, zero_reason: str | None = None,
                       policy_response: dict | None = None,
-                      required_plan_count: int | None = None) -> list[str]:
+                      required_plan_count: int | None = None,
+                      plan_format: str | None = None) -> list[str]:
         if required_plan_count is not None and (required_plan_count != 3 or len(drafts) != 3):
             raise ValueError("Expansion requires exactly three distinct plans")
-        if not isinstance(archive_review, dict) or archive_review.get("gaps") or "inspected_plan_ids" not in archive_review:
+        from alpha_agents.tree_search.core.mcts.design_documents import (
+            FORMAT,
+            SUMMARY_FIELDS,
+            parse_design_document,
+            validate_summary,
+        )
+        technical = plan_format == FORMAT
+        if plan_format is not None and not technical:
+            raise ValueError("Unknown plan format")
+        if technical and len(drafts) != self.config.max_plans:
+            raise ValueError("Expansion requires exactly three technical design documents")
+        if not technical and (not isinstance(archive_review, dict) or archive_review.get("gaps") or "inspected_plan_ids" not in archive_review):
             raise ValueError("Complete archive review with explicit inspected IDs is required")
         if not drafts and not zero_reason:
             raise ValueError("Closing an empty expansion requires a justified reason")
@@ -679,25 +729,35 @@ class TreeStore:
             op = self._owned(node, owner, token)
             if op["kind"] != "expansion" or self._row("nodes", node)["closed"]:
                 raise OwnershipError("Expansion already closed")
-            archive = {row[0] for row in self.db.execute("SELECT id FROM plans")}
-            if not set(archive_review["inspected_plan_ids"]) <= archive:
+            archive = set() if technical else {row[0] for row in self.db.execute("SELECT id FROM plans")}
+            if not technical and not set(archive_review["inspected_plan_ids"]) <= archive:
                 raise ValueError("Archive review references unknown plans")
             # The complete catalog ID set is rechecked at publication. Concurrent
             # new plans require a diversity recheck, not a silent stale publish.
-            if set(archive_review.get("catalog_plan_ids", [])) != archive:
+            if not technical and set(archive_review.get("catalog_plan_ids", [])) != archive:
                 raise CatalogChanged("Plan catalog changed or was incomplete; diversity recheck required")
             for slot, draft in enumerate(drafts, 1):
-                if "novelty_status" in draft and draft["novelty_status"] not in {"new_action", "cross_parent_adaptation"}:
+                if not technical and "novelty_status" in draft and draft["novelty_status"] not in {"new_action", "cross_parent_adaptation"}:
                     raise ValueError("Cannot publish a candidate classified as duplicate or inadmissible")
-                if "novelty_status" in draft and declares_same_parent_duplicate(draft):
+                if not technical and "novelty_status" in draft and declares_same_parent_duplicate(draft):
                     raise ValueError("Cannot publish a declared same-parent duplicate")
-                required = ("document", "intervention", "novelty", "diversity_audit", "evidence")
+                if technical:
+                    validate_summary({key: draft[key] for key in SUMMARY_FIELDS if key in draft})
+                    summary = parse_design_document(draft.get("document"))
+                    expected = {key: draft[key] for key in SUMMARY_FIELDS}
+                    expected["id"] = draft.get("candidate_id", draft["id"])
+                    if summary != expected:
+                        raise ValueError("Stored plan summary differs from its technical design document")
+                    if draft.get("proposal_slot") != slot or draft.get("existing_plan_ids") != [p["id"] for p in drafts[:slot-1]]:
+                        raise ValueError("Plan must identify the preceding proposals at this node")
+                required = ("document", "intervention", "evidence") if technical else ("document", "intervention", "novelty", "diversity_audit", "evidence")
                 if not all(draft.get(key) for key in required):
-                    raise ValueError("Plan requires full document, intervention, novelty, diversity, and evidence")
-                if not set(draft.get("closest_plan_ids", [])) <= archive:
+                    raise ValueError("Technical design requires full document, intervention, and evidence" if technical
+                                     else "Plan requires full document, intervention, novelty, diversity, and evidence")
+                if not technical and not set(draft.get("closest_plan_ids", [])) <= archive:
                     raise ValueError("Novelty audit references unknown existing plans")
                 action_key = fingerprint(normalize_intervention(draft["intervention"]))
-                metadata = {**draft, "archive_review": archive_review,
+                metadata = {**draft, **({"plan_format": FORMAT} if technical else {"archive_review": archive_review}),
                             "document_hash": document_hash(draft["document"])}
                 self.db.execute("INSERT INTO plans(id,node,slot,document,action_key,metadata) VALUES(?,?,?,?,?,?)",
                                 (draft["id"], node, slot, draft["document"], action_key, canonical_json(metadata)))
@@ -771,13 +831,18 @@ class TreeStore:
         pending = any(a["state"] not in {"eligible", "invalid"} for p in plans for a in p["attempts"])
         eligible = any(a["state"] == "eligible" for p in plans for a in p["attempts"])
         op = self.db.execute("SELECT * FROM operations WHERE node=? AND active=1", (node,)).fetchone()
-        exhausted = bool(n["closed"] and not op and not pending and not eligible and all(p["remaining"] == 0 for p in plans))
+        # Once a tree-wide success is committed, selection is forbidden at
+        # every frontier. Admitted transitions still settle before backup.
+        # Older frozen snapshots keep their original nonterminal prediction.
+        success = stop_receipt(self) or qualifying_success(self, node)
+        exhausted = bool(success or (n["closed"] and not op and not pending and not eligible and all(p["remaining"] == 0 for p in plans)))
         return {"node": node, "artifact_id": n["artifact"],
                 "score": json.loads(n["score"]) if n["score"] else None,
                 "depth": n["depth"], "closed": bool(n["closed"]),
                 "remaining_plan_slots": 0 if n["closed"] else self.config.max_plans - len(plans),
                 "plans": plans, "prior_version": n["prior_version"], "visits": n["n"],
                 "pending": pending or bool(op), "exhausted": exhausted,
+                "success_terminal": success,
                 "terminal": n["depth"] == self.config.max_depth or exhausted}
 
     def development_evidence(self, node: str) -> dict:
@@ -835,6 +900,8 @@ class TreeStore:
                 raise ValueError("Only continuing active trials can select")
             if self.db.execute("SELECT 1 FROM selections WHERE trial=? AND released=0 AND position NOT IN (SELECT position FROM path WHERE trial=?)", (trial, trial)).fetchone():
                 raise ValueError("An unfinished selection is already reserved")
+            if stop_receipt(self):
+                return {"kind": "cutoff", "reason": "qualified_task_success"}
             node = self._row("nodes", t["frontier"])
             cap = self.capacity(node["id"])
             if cap["terminal"]:
@@ -895,7 +962,7 @@ class TreeStore:
             implementation_priors = {a["id"]: 1 / len(children) for a in children}
             if new:
                 aid = self._id("attempt")
-                self._reserve(aid, {"implementation": 1, "judge_code": 1, "judge_execution": 1})
+                self._reserve(aid, {"implementation": 1, "judge_review": 1})
                 self.db.execute("INSERT INTO attempts(id,trial,plan,slot,state) VALUES(?,?,?,?,'reserved')",
                                 (aid, trial, p["id"], len(attempts) + 1))
                 child = None
@@ -914,6 +981,20 @@ class TreeStore:
                             (trial, pos, node["id"], p["id"], aid, node["prior_version"], canonical_json(implementation_priors)))
             return {"kind": "implement" if new else "stored", "attempt": aid, "child": child,
                     "parent": node["id"], "plan": p["id"], "position": pos, "prior_version": node["prior_version"]}
+
+    def save_implementation_report(self, attempt: str, report: dict):
+        """Persist validated role JSON before linking its generated child."""
+        row = self._row("attempts", attempt)
+        parent = self._row("nodes", self._row("plans", row["plan"])["node"])
+        if (report.get("attempt_id") != attempt or report.get("plan_id") != row["plan"]
+                or report.get("artifact_id") != parent["artifact"]):
+            raise ValueError("Implementation report identity mismatch")
+        payload = canonical_json(report)
+        with self.transaction():
+            old = self.db.execute("SELECT payload FROM implementation_reports WHERE attempt=?", (attempt,)).fetchone()
+            if old is not None and old[0] != payload:
+                raise ValueError("Implementation report is immutable")
+            self.db.execute("INSERT OR IGNORE INTO implementation_reports VALUES(?,?)", (attempt, payload))
 
     def register_child(self, attempt: str, child: str, artifact: str):
         with self.transaction():
@@ -935,6 +1016,7 @@ class TreeStore:
                 raise ValueError("Score must match exact artifact and frozen objective, and cannot be overwritten")
             self.db.execute("UPDATE nodes SET score=?,eligible=1 WHERE id=?", (canonical_json(asdict(score)), child["id"]))
             self.db.execute("UPDATE attempts SET state='eligible' WHERE id=?", (attempt,))
+            record_success(self, child["id"])
             self._release(attempt)
 
     def fail_attempt(self, attempt: str, reason: str):
@@ -975,6 +1057,7 @@ class TreeStore:
     def continuation_policy(self) -> dict:
         """Frozen hypothetical procedure; run limits do not truncate its target."""
         identity = self.db.execute("SELECT value FROM meta WHERE key='run_identity'").fetchone()
+        root = self.db.execute("SELECT value FROM meta WHERE key='root'").fetchone()
         return {
             "version": PREDICTION_VERSION, "discount_factor": self.config.discount_factor,
             "objective_id": self.objective.identity,
@@ -983,12 +1066,16 @@ class TreeStore:
                           "c_impl": self.config.c_impl, "prior_floor": self.config.prior_floor,
                           "parallel_selection": "pending-visits-preserve-observed-q-v1"},
             "max_plans": self.config.max_plans, "max_implementations": self.config.max_implementations,
-            "expansion": "Propose three admissible frozen plans at an open node; preserve used local capacity.",
+            "expansion": "Make three separate proposer calls, one technical design each; later calls receive earlier plan summaries and must not overlap them. Preserve used local capacity.",
             "implementation": "Fill unused slots incrementally first; once full, select exact eligible stored children with implementation PUCT.",
             "assessment": "Apply the same canonical S0 utility and frozen judge rubric/weight to every child.",
             "updates": "Add completed evidence, refresh policy priors when material evidence changes, and update statistics with discounted returns.",
             "computation": "Continue beyond actual depth, trial, attempt and invocation limits; these are execution cutoffs only.",
-            "termination": "Absorb only at closed nodes with no unused local slots, eligible stored children or pending work; future rewards are zero.",
+            "success_stop": {"version": SUCCESS_STOP_VERSION, "enabled": success_stop_enabled(self),
+                             "task": self.config.evaluation_task,
+                             "root_score": asdict(self.score(root[0])) if root else None,
+                             "rule": "Canonical U=1 and effective J>=original root J, excluding confirmed manipulation; stop new admission and drain admitted work."},
+            "termination": "When success_stop is enabled, a qualifying single-task success is absorbing. Once committed anywhere in the task tree, it stops new transitions at every frontier; drain admitted work. Otherwise absorb only at closed nodes with no unused local slots, eligible stored children or pending work; future rewards are zero.",
             "uncertainty": "Pending work and assessment outages are not termination; later results are unobserved at this snapshot.",
             "discount_unit": "One traversed harness transition, including stored traversal; plan bookkeeping, failed attempts and elapsed time add no discount steps.",
         }
@@ -1027,7 +1114,13 @@ class TreeStore:
                     value["capacity_summary"] = {key: field for key, field in original_capacity.items() if key != "reachable_evidence"}
                     value["provenance"] = json.loads(value["provenance"])
             policy = self.continuation_policy()
+            from alpha_agents.tree_search.core.mcts.implementation_history import (
+                implementation_history,
+            )
+            from alpha_agents.tree_search.core.mcts.value_forecast import CONTRACT
             snapshot = {**reachable[0], "reachable_subtree": reachable,
+                        "prior_implementations": implementation_history(self, frontier),
+                        "value_report_contract": dict(CONTRACT),
                         "reachable_evidence": evidence,
                         "score_id": self.score(frontier).identity,
                         "objective_id": self.objective.identity,
@@ -1071,6 +1164,14 @@ class TreeStore:
         if references:
             result["canonical_task_references"] = {"version": "canonical-task-reference-index-v1",
                                                     "tasks": references}
+            from alpha_agents.tree_search.core.mcts.task_cache import evidence_inventory
+            from alpha_agents.tree_search.infrastructure.evidence_sqlite import (
+                DIRECTORY,
+                inspection_catalog,
+            )
+            result["sqlite_inspection"] = [item for reference in references
+                if (Path(reference["evidence_path"]) / DIRECTORY / "index.json").is_file()
+                for item in inspection_catalog(Path(reference["evidence_path"]), evidence_inventory(Path(reference["evidence_path"])))]
         return result
 
     def persist_value(self, trial: str, value: float, capacity: dict, provenance: dict) -> str:
@@ -1085,6 +1186,19 @@ class TreeStore:
                 raise ValueError("Value capacity snapshot identifies a different frontier")
             score = self.score(t["frontier"])
             value = validate_value(score, value)
+            if "forecast_version" in provenance:
+                from alpha_agents.tree_search.core.mcts.value_forecast import (
+                    validate_forecast,
+                )
+                validate_forecast(provenance, {
+                    "score": asdict(score), "score_snapshot_id": score.identity,
+                    "capacity_snapshot_id": capacity["snapshot_id"], "objective_id": self.objective.identity,
+                    "continuation_policy_id": capacity["continuation_policy_id"],
+                    "discount_factor": capacity["discount_factor"], "capacity": capacity,
+                    "value_report_contract": capacity.get("value_report_contract"),
+                }, score.artifact_id)
+                if provenance["status"] != "completed" or provenance["value"] != value:
+                    raise ValueError("Persisted value must match the completed structured forecast")
             if capacity["exhausted"] and value != 0:
                 raise ValueError("Structurally exhausted continuation has zero net value")
             if not provenance:
@@ -1144,9 +1258,10 @@ class TreeStore:
 
 
 def normalize_intervention(intervention: dict) -> dict:
-    required = {"target", "operation", "conditions", "parameters", "scope", "mechanism"}
-    if set(intervention) != required:
-        raise ValueError("Intervention requires exactly target, operation, conditions, parameters, scope, and mechanism")
+    required = {"target", "operation", "conditions", "mechanism"}
+    # Preserve optional legacy fields so archived plan identities remain stable.
+    if not required <= set(intervention) or set(intervention) - required - {"scope", "parameters"}:
+        raise ValueError("Intervention requires target, operation, conditions, and mechanism")
     def normalize(value):
         if isinstance(value, str):
             return " ".join(value.split())
@@ -1158,7 +1273,8 @@ def normalize_intervention(intervention: dict) -> dict:
     # Preserve parameter values (e.g. case-sensitive file names); semantic
     # equivalence remains a documented proposer judgment, not this exact key.
     result = {key: normalize(value) for key, value in intervention.items()}
-    result["parameters"] = intervention["parameters"]
-    if not all(result[key] for key in ("target", "operation", "scope", "mechanism")):
-        raise ValueError("Intervention mechanism and edit scope cannot be empty")
+    if "parameters" in intervention:
+        result["parameters"] = intervention["parameters"]
+    if not all(result[key] for key in ("target", "operation", "mechanism")):
+        raise ValueError("Intervention target, operation, and mechanism cannot be empty")
     return result

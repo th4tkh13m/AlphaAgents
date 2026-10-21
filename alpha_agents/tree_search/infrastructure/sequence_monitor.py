@@ -23,18 +23,23 @@ class SequenceMonitor:
         if not path.exists():
             return
         state = json.loads(path.read_text())
+        limits = state.get("search_configuration", {})
+        rollout_limit = limits.get("max_trials", "configured")
+        depth_limit = limits.get("max_depth", "configured")
+        plans = limits.get("max_plans", "configured")
+        implementations = limits.get("max_implementations", "configured")
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         lines = ["# Live single-task experiment monitor", "", f"Updated: `{now}` (UTC).", "",
                  f"Sequence state: **{state['state']}**.", "",
-                 "Four fresh emulators. Each task: 30 completed rollouts, depth ≤ 8, 3 plans × 3 implementations per node.",
-                 "Only the current task contributes Android utility. Code review overlaps task execution.",
+                 f"Per-task limits: {rollout_limit} rollouts, depth ≤ {depth_limit}, {plans} plans × {implementations} implementation slots per plan. Qualified success may stop earlier.",
+                 "Only the current task contributes Android utility. Unified engineering review follows canonical task evaluation.",
                  "Elapsed review, device execution, queues, and model calls may overlap; do not sum their durations.", "",
                  "| Task | State | Tree |", "| --- | --- | --- |"]
         for step in state["steps"]:
             status = step["state"] + (" (root passed; search skipped)" if step.get("search_skipped") else "")
             lines.append(f"| {step['task']} | {status} | [{step['directory']}]({step['directory']}) |")
         if state.get("root_success_policy"):
-            lines += ["", "Fresh passing roots bypass MCTS and carry the exact root forward. Only failed roots receive 30 rollouts; skips do not invent rollout completions."]
+            lines += ["", "Fresh qualified passing roots bypass MCTS and carry the exact root forward. Failed roots receive bounded search; skips do not invent rollout completions."]
         errors = []
         for step in state["steps"]:
             if step["state"] not in {"running", "recovery_pending"}:
@@ -44,6 +49,8 @@ class SequenceMonitor:
             if not database.exists():
                 continue
             with snapshot_connection(database) as connection:
+                frozen = connection.execute("SELECT value FROM meta WHERE key='identity'").fetchone()
+                active_limit = json.loads(frozen[0])["config"]["max_trials"] if frozen else rollout_limit
                 def counts(table):
                     return dict(connection.execute(f"SELECT state,count(*) FROM {table} GROUP BY state"))
                 trials, attempts = counts("trials"), counts("attempts")
@@ -51,7 +58,7 @@ class SequenceMonitor:
                 depth = connection.execute("SELECT max(depth) FROM nodes").fetchone()[0]
                 roles = dict(connection.execute("SELECT purpose,count(*) FROM invocations GROUP BY purpose"))
                 lines += ["", f"## Active task: {step['task']}", "",
-                          f"Trials: `{json.dumps(trials)}`. Backups: **{backups}/30**. Maximum stored depth: **{depth}**.",
+                          f"Trials: `{json.dumps(trials)}`. Backups: **{backups}/{active_limit}**. Maximum stored depth: **{depth}**.",
                           f"Implementations: `{json.dumps(attempts)}`.", f"Role invocations: `{json.dumps(roles)}`.", "",
                           "| Artifact | Depth | Task U | Judge J | Combined F |", "| --- | ---: | ---: | ---: | ---: |"]
                 for row in connection.execute("SELECT artifact,depth,score FROM nodes WHERE eligible=1 ORDER BY depth,id"):
@@ -71,6 +78,7 @@ class SequenceMonitor:
                     for name, start, finish in [("single-task S0", "android_start", "android_finish"),
                                                 ("code review", "code_start", "code_finish"),
                                                 ("trajectory judge", "execution_start", "execution_finish"),
+                                                ("engineering review", "review_start", "review_finish"),
                                                 ("after-S0 continuation latency", "s0_ready", "score_ready")]:
                         if start in events and finish in events and row["state"] == "completed":
                             durations.setdefault((cohort, name), []).append((events[finish]-events[start])/60)

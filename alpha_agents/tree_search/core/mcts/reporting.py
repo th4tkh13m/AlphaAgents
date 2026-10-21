@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import math
 
-from alpha_agents.tree_search.core.mcts.contracts import judge_aggregate
+from alpha_agents.tree_search.core.mcts.judge_review import (
+    CRITERIA,
+    criterion_aggregate,
+    review_score,
+)
 
 
 def reviewer_timings(store) -> dict:
@@ -32,6 +36,7 @@ def reviewer_timings(store) -> dict:
             "code_android_overlap_seconds": overlap,
             "code_wait_after_s0_seconds": duration("s0_ready", "code_finish", allow_negative=True),
             "execution_phase_seconds": duration("execution_start", "execution_finish"),
+            "review_phase_seconds": duration("review_start", "review_finish"),
             "added_continuation_seconds": duration("s0_ready", "score_ready")})
     return {"source": "assessment_timings", "scope": "Observed phase elapsed time within each assessment; "
             "includes workspace/checkpoint/validation work and any compatible response reuse. "
@@ -143,6 +148,9 @@ def value_calibration(store) -> dict:
         item = {"value_id": row["id"], "frontier": row["frontier"], "prediction": row["value"],
                 "discount_factor": cap.get("discount_factor"),
                 "continuation_policy_id": cap.get("continuation_policy_id"), "observations": []}
+        provenance = json.loads(row["provenance"])
+        if provenance.get("forecast_version") == "value-v2":
+            item["forecast"] = provenance
         cutoff = cap.get("observed_path_rowid")
         if cutoff is None:
             item["unavailable_reason"] = "Historical snapshot has no traversal cutoff; timing cannot be established."
@@ -226,13 +234,28 @@ def score_breakdowns(store, subset: dict) -> list[dict]:
             dimensions = evidence["payload"]["dimensions"]
             if "narrative_review" in evidence:
                 item["judge_narrative_review"] = evidence["narrative_review"]
-            aggregate, unknown = judge_aggregate(dimensions)
+            aggregate, unknown = review_score(evidence["payload"])
             if not math.isclose(aggregate, score.j, abs_tol=1e-12, rel_tol=0):
                 raise ValueError("Report judge dimensions disagree with frozen judge utility")
-            item["judge_dimensions"] = {name: {**dimension, "effective_rating": .5 if dimension["score"] is None else dimension["score"],
-                "aggregate_contribution": (.5 if dimension["score"] is None else dimension["score"]) / 3}
-                for name, dimension in sorted(dimensions.items())}
-            item["unknown_dimensions"] = list(unknown)
+            if set(dimensions) == set(CRITERIA):
+                raw, _ = criterion_aggregate(dimensions)
+                rated = sum(c["assessment"] == "rated" for group in dimensions.values() for c in group.values())
+                item["judge_raw_score"] = raw
+                item["judge_integrity"] = evidence["payload"]["integrity"]
+                item["judge_rated_criteria"] = rated
+                item["unknown_criteria"] = list(unknown)
+                item["not_applicable_criteria"] = [id for group in dimensions.values() for id, c in group.items() if c["assessment"] == "not_applicable"]
+                item["judge_dimensions"] = {}
+                for name, group in dimensions.items():
+                    values = [c["score"] / 4 for c in group.values() if c["assessment"] == "rated"]
+                    item["judge_dimensions"][name] = {"criteria": group, "rated_count": len(values),
+                        "normalized_score": math.fsum(values) / len(values) if values else None,
+                        "aggregate_contribution": math.fsum(values) / rated if aggregate == raw else 0.0}
+            else:
+                item["judge_dimensions"] = {name: {**dimension, "effective_rating": .5 if dimension["score"] is None else dimension["score"],
+                    "aggregate_contribution": (.5 if dimension["score"] is None else dimension["score"]) / 3}
+                    for name, dimension in sorted(dimensions.items())}
+                item["unknown_dimensions"] = list(unknown)
         else:
             item["missing_sources"].append("canonical_judge_dimensions")
         if score and node["parent"]:

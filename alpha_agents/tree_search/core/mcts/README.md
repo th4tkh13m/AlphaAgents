@@ -58,6 +58,26 @@ arbitrary evaluation stages or objectives. The production CLI still assembles
 Codex and AndroidWorld/Artemis; another integration supplies different ports
 and assembly code rather than editing the search core.
 
+### Unified engineering review
+
+Root and child assessment collect canonical Screen/S0 evidence before one
+`judge_review` invocation. The independent reviewer inspects code and execution
+under `artifact-quality-rubric-v3`, with ten criteria in each of four dimensions.
+`judge_review.py` owns the closed report schema, cross-field validation, and
+scoring contract. Each rated criterion is an integer from zero through four.
+
+Raw J equals `sum(rated scores) / (4 * rated count)`, in [0, 1]. Unknown and
+non-applicable criteria remain explicit and are excluded from that denominator;
+no rated criteria makes the review unavailable. A confirmed manipulation finding
+forces effective J to zero while retaining raw J and the integrity conclusion.
+Reports expose individual criteria, counts, normalized dimension summaries, and
+contributions to effective J. Combined utility still uses its frozen judge weight.
+
+Reservations fund one review per assessment. Recovery reuses canonical evaluation
+and compatible persisted reviews, and reissues only unavailable review work.
+A fresh rubric/prompt identity prevents reinterpreting historical experiment
+ratings under this contract; historical score reporting retains legacy semantics.
+
 ### Frozen identity compatibility
 
 `FixedPUCTConfig.from_mapping()` accepts `role_invocation_cap` and
@@ -68,8 +88,13 @@ equivalent configurations keep their fingerprints. Status adds
 Production adapters retain the `codex`/`android` preflight labels and `codex`
 cost label; alternative adapters use their declared `telemetry_name`.
 
-Codex context enrichment preserves the previous native Plan/Goal context,
-rendered requests, and prompt hashes. Moving source files or changing trusted
+Proposer and implementer use persisted native Goals in default collaboration
+mode. The proposer remains read-only and returns its full Markdown design and
+fenced JSON summary as the completed Goal's final response. Validation repair
+updates the goal context file and resumes the same objective and deadline.
+The implementer returns its implementation JSON. No native Plan preset is
+required by runtime preflight. Rendered requests and prompt-library hashes bind
+these role-specific objectives and output contracts. Moving source files or changing trusted
 evaluator code still changes the source hash used by production run identity.
 An old frozen run may therefore reject resume with this evaluator version.
 Keep its matching software or create a fresh run; do not rewrite stored hashes
@@ -82,32 +107,43 @@ integration modules were loaded.
 
 Inspect and edit the [Codex prompt assets](../../mutators/coding_agents/codex/roles/prompts/README.md).
 Detailed role text and native Goal objectives are Markdown; static request
-guidance is JSON. Version v22 pins all these instruction assets in the library
+guidance is JSON. Version v34 pins all these instruction assets in the library
 identity. Native workers verify the admitted library and rendered-prompt binding
 before starting a model turn. Changing assets requires compatible run identity;
 old unbound native request files are historical evidence and cannot be silently
 replayed under a different prompt version.
 
-All six role templates include explicit evidence and completion rubrics. Judges
-share `artifact-quality-rubric-v2`, with five behavioral anchors for each of three
-quality dimensions. Confidence does not rescale scores; unsupported dimensions
-remain explicitly unknown. Code review is preliminary and independent execution
-review owns the final assessment. Other roles use their existing plan, prior,
-engineering-status and discounted-value outputs rather than extra ordinal scores.
-Static instructions and JSON guidance are domain-neutral; adapter context supplies
-application semantics, source/evidence formats and optional diagnostics. No output
-schema, utility weight or core interface changes are needed. The rubric/prompt
-identities prevent incompatible resumes. `test_role_rubrics.py` covers all-role
-rendering, domain neutrality, anchor cardinality and identity binding; live grader
-agreement and calibration require separate experimental evidence.
+All active role templates include explicit evidence and completion requirements.
+The unified judge uses `artifact-quality-rubric-v3` and its forty-criterion schema;
+confidence does not rescale scores. Proposer, policy, implementer, and value keep
+their design, prior, engineering-status, and discounted-value outputs. Static
+instructions are domain-neutral, with adapter context supplying application
+semantics, source/evidence formats, and optional diagnostics. Production judge
+protocol identity includes the normalization, missing-evidence, and integrity
+rules as well as prompt identity. Legacy templates and snapshot aggregation remain
+available for explicit historical inspection, without relabeling their ratings.
+Software tests establish these contracts; empirical reviewer calibration remains
+separate experimental work.
 
-Each successful harness expansion registers exactly three distinct frozen plans.
-Each plan has three implementation slots, filled through MCTS selection rather
-than a batch of nine candidates. A response with fewer than three admissible
-plans leaves expansion incomplete and open for recovery. It cannot establish
-terminal exhaustion. Trial budgets and interrupted work can leave implementation
-slots unattempted; report those slots explicitly. Earlier runs that admitted
-fewer plans retain their original frozen protocol and evidence.
+Each successful expansion makes three sequential proposer invocations. Each
+returns one technical design document and a fenced JSON summary. Calls two and
+three receive summaries of earlier plans at that node and must describe a
+non-overlapping mechanism. Exact normalized duplicate interventions are rejected;
+semantic overlap remains an explicit proposer responsibility. All three documents
+are published atomically after policy assessment. A failed slot leaves expansion
+open; recovery can reuse earlier validated responses without another model call.
+Expansion reserves two calls per proposal slot plus two policy calls, with unused
+reservations released at publication or failure. Each frozen plan retains three
+implementation slots filled through MCTS selection.
+
+Validated implementer JSON is stored immutably in `implementation_reports`, keyed
+by attempt. Proposer context contains controller-curated `prior_implementations`
+from the selected lineage in chronological order, including the current parent
+implementation and excluding the root and sibling implementations. Curated fields
+include changes, verification, diagnostic outcomes, blockers, and limitations.
+Canonical scores are identified separately from implementer claims. Older attempts
+without stored JSON are explicitly unavailable; history is never fabricated.
+Inline summaries do not grant access to paths mentioned in their contents.
 
 The shared CLI can inspect older stored runs without applying current runtime
 settings. Resume/finalize execution still verifies frozen configuration, prompt,
@@ -132,11 +168,11 @@ nonzero forecast. Hypothetical continuation ignores actual depth/global budget
 cutoffs, preserves used local branching capacity, fills unused implementation
 slots before traversing stored eligible children, and updates evidence, priors,
 and discounted statistics under the same procedure. Pending work/outages are
-not termination. Empty paths and proven structural exhaustion retain zero
-future return without an invocation. Snapshots and assessments bind
+not termination. Empty paths, proven structural exhaustion, and qualifying
+single-task success retain zero future return without an invocation. Snapshots and assessments bind
 `discount_factor` and `continuation_policy_id` to artifact/objective/evidence
-identities. Prediction is `fixed-puct-discounted-continuing-v4`; backup is
-`discounted-component-backup-v2`; prompts are v22. Old undiscounted N/W/Q cannot
+identities. Prediction is `fixed-puct-discounted-continuing-v6`; backup is
+`discounted-component-backup-v2`; prompts are v34. Old undiscounted N/W/Q cannot
 resume into this contract. Status/export inspection remains available; start a
 new run rather than silently relabeling older statistics. `value_horizon` is
 removed. Status and final reports show best measured retained-artifact quality
@@ -161,20 +197,14 @@ performance. Diagnostics do not automatically tune them or add a cost objective.
 
 On node reselection, new completed/invalid implementation outcomes or retained
 Selection evidence trigger a versioned policy refresh before edge reservation.
-Refresh ownership is fenced; peer workers wait. Archive-sensitive expansions
-share one persisted publication reservation across nodes, acquired atomically
-with node ownership. Other workers can implement, evaluate, traverse stored
-edges, and refresh priors while a proposal is assessed. A worker needing another
-expansion waits without spending model calls. The same heartbeat and verified
-stale-owner reclamation release this reservation after interruption. If the
-publication check nevertheless finds a stale catalog, the expansion uses its
-remaining reserved proposal/policy retry to review the updated archive and
-reassess the candidates.
-The recheck is a fresh native Plan invocation with the full previous proposal,
-updated index and explicit diversity task, each with its own two-hour allowance.
-It does not reset the call budget or borrow protected completion reservations.
-Repeated catalog changes beyond that allowance leave expansion open for recovery. Calls and the permitted retry
-are reserved separately from trial completion. Refreshes preserve frozen plans,
+Refresh ownership is fenced; peer workers wait. Expansions retain one persisted
+publication reservation across nodes, acquired atomically with node ownership.
+Other workers can implement, evaluate, traverse stored edges, and refresh priors
+while proposals are assessed. The existing heartbeat and verified stale-owner
+reclamation release this reservation after interruption. New-format proposers
+receive only ancestry implementation history and earlier plans at the same node;
+they do not review or recheck the global catalog. Calls and permitted retries are
+reserved separately from trial completion. Refreshes preserve frozen plans,
 all N/W/Q statistics, and the exact prior versions recorded by older selections.
 Visit counts and pending reservations alone do not trigger model calls. A failed
 refresh retains the last valid distribution and stops admission for recovery.
@@ -218,9 +248,14 @@ An optional `codex.runtime.verification_python` points to a prepared virtual
 environment for non-device implementer tests. Its exact environment directory
 is granted read access only to implementation roles; parent directories are
 not exposed. The supplied pytest command uses that environment without
-expanding the frozen plan's edit scope. Interpreter paths preserve virtual
+granting access to protected benchmark or evaluator files. Interpreter paths preserve virtual
 environment symlinks. Omit this setting to preserve an existing run's runtime
 identity; changing it requires a new run configuration.
+Prepare the harness's declared verification dependencies in that environment,
+including required development tools such as Ruff; a working pytest runner
+does not imply that a linter is installed. Use disposable workspace copies for
+post-run checks and disable tool caches where appropriate (`ruff check
+--no-cache ...`). Never run cache-writing tools against frozen artifact content.
 For an existing ChatGPT Codex login, configure `auth_mode="codex_login"`
 and `base_url="https://chatgpt.com/backend-api/codex"`. For an API key,
 use the example's `environment` authentication and `https://api.openai.com/v1`.
@@ -229,8 +264,19 @@ to the API-key endpoint can fail with HTTP 401 and `api.responses.write`.
 See [official login routing guidance](https://learn.chatgpt.com/docs/enterprise/sign-in-with-chatgpt-through-a-gateway).
 The adapter preserves the explicit endpoint rather than silently rerouting it.
 
-Proposer contexts include versioned test-scope and novelty-admission contracts.
-Plans must permit their necessary test edits and explicitly classify every
+Proposer contexts include versioned candidate-edit and novelty-admission contracts.
+New intervention metadata contains `target`, `operation`, `conditions`, and
+`mechanism`. Detailed plan prose provides a senior-to-junior implementation
+handoff: current behavior, intended flow, ordered source edits and integration,
+worked examples, and tests with acceptance criteria. Settings and behavioral
+rules belong in those instructions rather than a separate `parameters` field.
+Legacy parameters remain readable and retain their original identity.
+Plans do not declare a file edit allowlist. Implementors may change candidate
+harness files needed for the intervention, including supporting code and tests.
+Legacy plan `scope` metadata is retained for identity compatibility and is not
+used to reject diagnostic, final, or recovered artifacts. Benchmark/evaluator
+and evidence protections remain in force.
+Plans must identify meaningful verification and explicitly classify every
 candidate as a new action or a cross-parent adaptation. Declared duplicates
 and scope-only repairs are inadmissible; adaptations require a reviewed plan
 at a different parent artifact. Exact intervention uniqueness and semantic
@@ -326,10 +372,11 @@ Older numeric-only records remain explicitly without policy reasoning.
 Frozen plans are exported as read-only `plan_archive/<identity>/PLAN.md`
 files with SHA-256 hashes in SQLite metadata and proposal catalogs. The complete
 catalog supplies every intervention, status, attempt/outcome summary, and exact
-file reference. Full novelty/diversity/provenance records remain in read-only
-`PLAN.json` files beside each plan. The proposer reads relevant full documents
-through those paths; plan bodies are not duplicated across the entire initial
-archive context, and no catalog entries are omitted. Missing
+file reference. Controller summaries and provenance remain in read-only
+`PLAN.json` files beside each plan for archival inspection; legacy records also
+retain their original novelty and diversity fields. New proposer inputs
+use JSON-curated lineage summaries and node-local existing plan summaries rather
+than the complete archive catalog. Missing
 exports are rebuilt from SQLite; changed exports are rejected. Each archived
 attempt additionally points to a hash-verified, read-only
 `evidence_archive/<identity>/ATTEMPT.json` containing the exact parent/child,
@@ -430,3 +477,99 @@ python -m alpha_agents.tree_search.bridges.androidworld.prepare_subset --manifes
 
 The checked-in reference is `bridges/androidworld/s0_golden.json`. Selection
 weights and IDs remain unchanged by relocating the preparation script.
+
+### Structured value forecast validation
+
+The active value role returns a closed `value-v2` report. Core `value_forecast.py`
+validates its baseline, exact snapshot/policy identities, six rubric assessments,
+scenario probabilities and transitions, discounted remaining continuation, final
+aggregation, sensitivity, and signed bounds with a declared 1e-9 absolute
+arithmetic tolerance. Subjective probabilities and causal claims remain model
+judgments; arithmetic validation is not empirical calibration. Nonterminal
+completed reports require sensitivity analysis.
+
+Ancestry implementation summaries are curated from authoritative JSON and frozen
+into the frontier snapshot before forecasting. Recovery reuses those summaries
+and the original continuation evidence. Their embedded prose does not grant
+filesystem reads or arbitrary citation authority. Full forecasts are retained in
+value provenance and exposed with calibration/status records. Invalid or
+incomplete reports preserve the pending trial without publishing a convenient
+zero or backing up statistics. Existing explicitly recorded manual/historical
+scalar provenance remains readable; new model responses require value-v2.
+
+
+### Storage lifecycle (v29)
+
+Read-only role invocations and value continuation views share one verified code
+copy per artifact under `value_code_views/<artifact_id>`. Implementers and device
+executions still receive independent writable materializations; writable files
+are never hardlinked to frozen source. Recreating a missing shared view preserves
+its artifact path and validated-response reuse, without a new model invocation.
+A corrupt existing view fails verification rather than being silently repaired.
+
+Before a completed task's evidence inventory is sealed, the trusted publisher
+creates `.alpha_inspection_sqlite/index.json` and one standalone inspection DB per
+original SQLite file. Stable DB/WAL or rollback-journal copies feed SQLite backup; the destination
+uses DELETE journal mode and is closed before publication. Source DB/WAL/SHM
+hashes and snapshot hashes are bound to the sealed inventory. Role inputs expose
+`sqlite_inspection` with exact read-only immutable URIs; roles inspect these
+snapshots directly instead of making their own database copies. An optional
+SQLite preparation failure is recorded as an unavailable inspection with its
+source identity and error; it does not replace a valid canonical task outcome. Historical
+inputs without these declarations retain the safe scratch-copy fallback.
+
+Terminal validated roles may evict derived SQLite scratch files after their
+owned processes have exited, retaining scripts, logs and retention receipts.
+Completed implementations retire unneeded source only after their report and
+frozen-attempt checkpoint are durable; cited local files and `.pytest_cache`
+verification records stay at their original paths. Partial or interrupted
+engineering workspaces and inputs with still-live owned subprocesses remain intact. Completed evaluation inputs are retired
+after canonical evidence publication; pending or failed inputs are preserved.
+Frozen artifacts, canonical evidence, role responses, scores and backups remain.
+
+Diagnostic handoffs expose independently inventory-checked read-only directory
+projections. Their regular files share canonical evidence inodes, rather than
+copying the bytes again. Role permissions keep both locations read-only; this
+mechanism is never used for mutable harness files. Unsupported hardlinks fall
+back to copies and report their actual storage mode. Deleting a projection
+leaves canonical evidence intact.
+
+These changes affect trusted runner and prompt identities. Use a fresh run for
+the new protocol; existing experiment evidence and frozen statistics are not
+rewritten or garbage-collected by upgrading the runtime.
+
+
+### Single-task success stopping
+
+For a fresh single-task search, `stop_on_task_success` defaults to `true`.
+A candidate qualifies when its sealed canonical task outcome is successful
+(`U=1`), its completed effective judge score is at least the task tree's original
+root judge score, and its review does not confirm evaluation manipulation.
+The baseline remains the original root throughout that task. Scores and snapshot
+identities are checked against their persisted canonical outcome and judge reports;
+missing, partial, or contradictory evidence cannot trigger this rule. A qualifying
+passing root needs no search trials. This rule does not apply to multi-task search.
+
+Score publication commits a `task_success_stop` receipt in the same transaction.
+New trials and new selections are then blocked, while already admitted work drains
+through assessment, transition recording, and exactly-once backup. Interrupted
+work stays recovery-pending and prevents finalization; resume settles it before
+handoff. A qualifying frontier is an absorbing success state with zero remaining
+value. A committed success stops new selections at every frontier in that tree;
+frontiers frozen after the stop also have zero remaining value. A forecast frozen
+before success retains its original evidence cutoff and normal validation, even
+if it finishes during draining. Missing forecasts never receive a synthetic zero.
+
+Finalization may finish below the configured rollout limit only with a validated
+success receipt and settled trials/reservations. It chooses the highest observed
+combined score among qualifying harnesses, using the existing deterministic ties.
+It verifies canonical evidence again before freezing/exporting the winner. Reports
+retain the trigger, original root score, actual completed rollout count, configured
+limit, and whether stopping was early. The task sequence passes that exact winner
+to the next task, where the root is evaluated afresh. Without qualifying success,
+the existing configured-budget combined-score selection remains in effect.
+
+Set `stop_on_task_success=false` to run the full configured search for comparison.
+The flag, prediction protocol v6, success policy, and prompt library v34 belong to
+the frozen experiment identity. Start a fresh compatible run; historical statistics
+and already-running experiments are not migrated or silently reinterpreted.

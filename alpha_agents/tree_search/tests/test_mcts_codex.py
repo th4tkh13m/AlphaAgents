@@ -49,7 +49,7 @@ def test_explicit_provider_configuration_uses_owned_namespace(provider, auth_mod
     assert runtime.identity
 
 
-@pytest.mark.parametrize("role", ["policy", "judge_code", "judge_execution", "value"])
+@pytest.mark.parametrize("role", ["policy", "judge_review", "value"])
 def test_generic_role_overrides_reach_exec_subcommand_parser(tmp_path, monkeypatch, role):
     from alpha_agents.tree_search.mutators.coding_agents.codex.roles import codex
 
@@ -85,6 +85,19 @@ def test_generic_role_overrides_reach_exec_subcommand_parser(tmp_path, monkeypat
 def request(tmp_path, role="implementer", context=None):
     return RoleRequest(str(tmp_path), "request-a", role, "artifact-a", "configured-model", "high",
                        context if context is not None else {"plan_id": "plan-a", "attempt_id": "attempt-a"})
+
+
+def legacy_plan_request(tmp_path, role="proposer", context=None):
+    """Historical Plan transport tests are independent of current role defaults."""
+    class LegacyPlanRequest(RoleRequest):
+        @property
+        def collaboration_mode(self):
+            return "plan"
+        @property
+        def execution_mode(self):
+            return "plan"
+    req = request(tmp_path, role, context)
+    return LegacyPlanRequest(**req.to_record())
 
 
 @pytest.mark.parametrize("terminal", ["completed", "failed"])
@@ -207,18 +220,18 @@ def test_goal_retains_full_prompt_and_explicit_completion_contract(tmp_path):
     assert "7,200-second" in objective and "do not reset" in objective
     assert req.execution_mode == "goal"
     assert req.permission_mode == "workspace-write"
-    assert "native /goal" in req.render()
+    assert "persisted native Codex Goal" in req.render()
 
 
 def test_plan_payload_preserves_native_default_plan_instructions(tmp_path):
-    req = request(tmp_path, "proposer", {"plan_archive": {"plan_ids": []}})
+    req = legacy_plan_request(tmp_path, "proposer", {"plan_archive": {"plan_ids": []}})
     payload = plan_payload(req, tmp_path)
     assert payload["collaborationMode"] == {"mode": "plan", "settings": {
         "model": "configured-model", "reasoning_effort": "high", "developer_instructions": None}}
     assert payload["permissions"] == "alpha_agents_role"
     assert "sandboxPolicy" not in payload
     assert "<proposed_plan>" in req.render()
-    assert "ordinary final agent message" in req.render()
+    assert "<proposed_plan>" in req.render() and "single fenced JSON" in req.render()
     with pytest.raises(ValueError):
         plan_payload(request(tmp_path), tmp_path)
 
@@ -257,6 +270,7 @@ def test_cross_parent_adaptation_must_identify_a_different_parent(tmp_path, pare
                  "novelty_status": "cross_parent_adaptation"}
     response = {"artifact_id": req.artifact_id, "plans": [candidate],
                 "archive_review": {"catalog_plan_ids": ["old"], "inspected_plan_ids": ["old"], "gaps": []}}
+    del candidate["intervention"]["scope"]
     if parent == "different-artifact":
         assert validate_response(response, req, tmp_path) is response
     else:
@@ -307,7 +321,7 @@ def test_unaccepted_plan_retains_native_output_and_usage(tmp_path, monkeypatch, 
         def unregister_turn_notifications(self, turn_id):
             unregistered.append(turn_id)
     with pytest.raises((ValueError, RuntimeError)):
-        codex_worker._collect_plan(Client(), request(tmp_path, "proposer"), tmp_path, tmp_path)
+        codex_worker._collect_plan(Client(), legacy_plan_request(tmp_path, "proposer"), tmp_path, tmp_path)
     stored = json.loads((tmp_path / "native_result.json").read_text())
     assert stored["status"] == status and stored["usage"] == {"total_tokens": 17}
     assert stored["items"] == result.items
@@ -398,7 +412,7 @@ def test_optional_verification_tools_preserve_existing_runtime_records():
 
     from alpha_agents.tree_search.mutators.coding_agents.codex.roles import verification
     assert shlex.split(context["command"]) == ["/prepared/venv/bin/python", str(Path(verification.__file__).resolve())]
-    assert "frozen plan scope" in context["purpose"]
+    assert "protected benchmarks, evaluators, or parent evidence" in context["purpose"]
 
 
 @pytest.mark.parametrize("native_status", ["paused", "blocked", "budget_limited", "usage_limited"])
@@ -551,13 +565,14 @@ def test_full_prompt_transport_uses_file_input_beyond_argument_size(tmp_path):
 def test_native_plan_retains_developed_sections_and_ignores_fenced_headings(tmp_path, heading_id):
     req = request(tmp_path, "proposer", {"plan_archive": {"plan_ids": []}})
     metadata = {"id": "candidate-a", "intervention": {"target": "controller", "operation": "add recovery",
-        "conditions": "verified failure", "parameters": {"retries": 2}, "scope": ["controller.py"],
+        "conditions": "verified failure",
         "mechanism": "bounded verified retry"}, "novelty": "Distinct recovery mechanism",
         "diversity_audit": "Compared archive mechanisms", "closest_plan_ids": [], "evidence": ["controller.py"]}
     document = ('## Archive review\n```json\n{"catalog_plan_ids": [], "inspected_plan_ids": [], "gaps": []}\n```\n'
                 '## Candidate candidate-a\n```json\n' + json.dumps(metadata) + '\n```\n'
                 '### Diagnosis\nInspect actual control flow and failed trajectories.\n'
                 '```python\n## This is code, not a candidate heading\n```\n'
+                '### Implementation steps\nIn controller.py, add a bounded recovery branch with at most two retries.\n'
                 '### Verification\nRun meaningful behavioral checks.\n'
                 '## Diversity audit\nCompare conditions, mechanisms, parameters and affected behavior.\n')
     document = document.replace("## Candidate candidate-a", f"## Candidate {heading_id}")
@@ -565,6 +580,7 @@ def test_native_plan_retains_developed_sections_and_ignores_fenced_headings(tmp_
     result = parse_native_plan(document, req)
     assert result["native_document"] == document
     assert "### Verification" in result["plans"][0]["document"]
+    assert "add a bounded recovery branch with at most two retries" in result["plans"][0]["document"]
     validate_response(result, req, tmp_path)
     for invalid_id in ("other", "`other`", "`candidate-a` extra", "`candidate-a", "`candidate-a``"):
         with pytest.raises(ValueError, match="IDs do not agree"):
@@ -598,9 +614,8 @@ def test_role_profiles_grant_only_workspace_and_explicit_canonical_evidence(tmp_
     hidden_plan = tmp_path / "plan_archive" / "plan-id" / "PLAN.md"
     hidden_plan.parent.mkdir(parents=True)
     hidden_plan.write_text("incoming plan")
-    req = request(tmp_path, "judge_execution", {"artifact": "artifact-a", "rubric": "rubric",
-        "canonical_evidence": {"evidence": [str(evidence)]},
-        "code_findings": {"evidence": [str(hidden_plan)]}})
+    req = request(tmp_path, "judge_review", {"artifact": "artifact-a", "rubric": "rubric",
+        "canonical_evidence": {"evidence": [str(evidence)]}})
     profile = role_permissions(req, workspace)
     assert profile["filesystem"][str(workspace)] == "read"
     assert profile["filesystem"][str(evidence)] == "read"
@@ -632,7 +647,7 @@ def test_large_evidence_manifest_compacts_only_already_granted_read_roots(tmp_pa
     other.parent.mkdir(parents=True)
     other.write_text("{}")
     context = {"canonical_evidence": {"files": files, "root": str(root), "other": str(other)}}
-    profile = role_permissions(request(tmp_path, "judge_execution", context), tmp_path / "workspace")
+    profile = role_permissions(request(tmp_path, "judge_review", context), tmp_path / "workspace")
     assert profile["filesystem"][str(root)] == "read"
     assert all(path not in profile["filesystem"] for path in files)
     assert profile["filesystem"][str(other)] == "read"
@@ -650,7 +665,7 @@ def test_judge_canonical_context_cannot_grant_forbidden_run_reads(tmp_path, forb
     path = tmp_path / forbidden
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("excluded evidence")
-    req = request(tmp_path, "judge_execution", {"canonical_evidence": {"evidence": [str(path)]}})
+    req = request(tmp_path, "judge_review", {"canonical_evidence": {"evidence": [str(path)]}})
     with pytest.raises(ValueError, match="forbidden"):
         role_permissions(req, tmp_path / "workspace")
 
@@ -739,15 +754,11 @@ def test_final_judge_citations_use_only_assigned_code_and_canonical_task_files(t
     references = {"database": str(database), "image": str(image), "sibling": str(sibling),
                   "symlink": str(alias), "narrative": f"Source: {database} — inspected trajectory",
                   "model_claim": "unverified-model-authored-reference"}
-    req = request(tmp_path, "judge_execution", {"rubric": "rubric", "canonical_evidence": {
-        "snapshot_id": "canonical", "evidence": [str(evidence)]},
-        "code_findings": {"evidence": [references["model_claim"]]}})
-    response = {"artifact_id": req.artifact_id, "phase": "execution", "status": "completed",
-                "rubric_version": "rubric", "canonical_evidence_id": "canonical",
-                "findings": "Inspected supplied evidence", "coverage": {"inspected": [], "unseen": []},
-                "dimensions": {name: {"score": .5, "rationale": "Observed canonical records",
-                    "confidence": "low", "evidence": [references[kind]]}
-                    for name in ("robustness", "decisions", "generalizable")}}
+    from alpha_agents.tree_search.tests.judge_fixtures import review_payload
+
+    req = request(tmp_path, "judge_review", {"rubric": "rubric", "canonical_evidence": {
+        "snapshot_id": "canonical", "evidence": [str(evidence)]}})
+    response = review_payload(artifact=req.artifact_id, rubric="rubric", evidence=references[kind])
     if kind in {"database", "image"}:
         assert validate_response(response, req, workspace) == response
     else:
@@ -878,10 +889,10 @@ def test_value_can_cite_exact_reachable_code_without_reading_sibling_views(tmp_p
     context = {"score_snapshot_id": "score", "capacity_snapshot_id": "capacity", "objective_id": "objective", "discount_factor": .9, "continuation_policy_id": "policy",
                "reachable_code_views": [{"node_id": "child", "artifact_id": "a" * 64, "code_path": str(view)}]}
     req = request(tmp_path, "value", context)
-    response = {"artifact_id": req.artifact_id, "status": "completed", "score_snapshot_id": "score",
-                "capacity_snapshot_id": "capacity", "objective_id": "objective", "discount_factor": .9, "continuation_policy_id": "policy",
-                "value": .1, "rationale": "Inspect the stored recovery mechanism", "uncertainty": "Limited development tasks",
-                "evidence": [str(code) + ":1:1"]}
+    from alpha_agents.tree_search.tests.value_fixtures import forecast_payload
+    context["score"] = {"u": .5, "j": .5, "objective": {"judge_weight": .1}}
+    req = request(tmp_path, "value", context)
+    response = forecast_payload(context, req.artifact_id, .1, str(code) + ":1:1")
     assert validate_response(response, req, tmp_path / "workspace") == response
     profile = role_permissions(req, tmp_path / "workspace")
     assert profile["filesystem"][str(view)] == "read"
@@ -1017,16 +1028,19 @@ def test_unavailable_value_assessment_cannot_publish_zero_forecast(tmp_path, sta
     context = {"score_snapshot_id": "score", "capacity_snapshot_id": "capacity",
                "objective_id": "objective", "discount_factor": .9, "continuation_policy_id": "policy"}
     req = request(tmp_path, "value", context)
-    response = {"artifact_id": req.artifact_id, **context, "value": value,
-                "rationale": "Required continuation evidence could not be consumed",
-                "uncertainty": "Forecast unavailable", "evidence": ["context:score_snapshot_id"]}
-    if status is not None:
+    from alpha_agents.tree_search.tests.value_fixtures import forecast_payload
+    context["score"] = {"u": .5, "j": .5, "objective": {"judge_weight": .1}}
+    req = request(tmp_path, "value", context)
+    response = forecast_payload(context, req.artifact_id, evidence="context:score_snapshot_id")
+    response.update(value=value)
+    if status is None:
+        response.pop("status")
+    else:
         response["status"] = status
-    with pytest.raises(ValueError, match="assessment is incomplete"):
+    with pytest.raises(ValueError):
         validate_response(response, req, tmp_path)
-    response.update(status="completed", value=0,
-                    rationale="Available evidence supports balanced improvement and regression prospects")
-    assert validate_response(response, req, tmp_path)["value"] == 0
+    completed = forecast_payload(context, req.artifact_id, evidence="context:score_snapshot_id")
+    assert validate_response(completed, req, tmp_path)["value"] == 0
 
 
 def test_assessment_schema_freezes_identity_and_snapshot_aliases_are_exact(tmp_path):
@@ -1073,7 +1087,7 @@ def test_native_worker_rejects_changed_goal_template_before_model_launch(tmp_pat
         "version": "native-prompt-binding-v1", "library_hash": request.library_hash,
         "prompt_hash": request.prompt_hash}}))
     assert load_native_request(path).library_hash == request.library_hash
-    monkeypatch.setattr(prompts, "GOAL_OBJECTIVE_TEMPLATE", prompts.GOAL_OBJECTIVE_TEMPLATE + "changed")
+    monkeypatch.setattr(prompts, "IMPLEMENTER_GOAL_OBJECTIVE_TEMPLATE", prompts.IMPLEMENTER_GOAL_OBJECTIVE_TEMPLATE + "changed")
     with pytest.raises(ValueError, match="prompt assets differ"):
         load_native_request(path)
 
@@ -1142,7 +1156,7 @@ def test_native_plan_repairs_actual_validation_errors_in_same_thread_and_mode(tm
     (tmp_path/'controller.py').write_text('value = 1\n')
     bad, good = _repair_plan_document(failure), _repair_plan_document()
     client, turns, released = _plan_repair_client(monkeypatch, [bad,good])
-    req = request(tmp_path,'proposer',{'plan_archive':{'plan_ids':[]},'required_plan_count':3})
+    req = legacy_plan_request(tmp_path,'proposer',{'plan_archive':{'plan_ids':[]},'required_plan_count':3})
     deadline = InvocationDeadline(7200)
     end = deadline.ends
     result = adapter._collect_plan(client,req,tmp_path,tmp_path,deadline)
@@ -1150,7 +1164,7 @@ def test_native_plan_repairs_actual_validation_errors_in_same_thread_and_mode(tm
     assert len(turns) == 2 and released == ['turn-0','turn-1']
     assert all(t[0]=='same-planning-thread' and t[2]['collaborationMode']['mode']=='plan' for t in turns)
     assert turns[0][2] == turns[1][2] and req.render() in turns[1][1]
-    assert 'validation_error' in turns[1][1] and 'same persisted planning thread' in turns[1][1]
+    assert 'validation_error' in turns[1][1] and 'same persisted planning thread' in ' '.join(turns[1][1].split())
     assert deadline.ends == end
     assert (tmp_path/'native_plan_attempt_0.md').read_text() == bad
     assert (tmp_path/'native_plan_attempt_1.md').read_text() == good
@@ -1162,7 +1176,7 @@ def test_native_plan_repair_remains_bounded_and_preserves_rejected_drafts(tmp_pa
     (tmp_path/'controller.py').write_text('value = 1\n')
     bad = _repair_plan_document('metadata')
     client,turns,released = _plan_repair_client(monkeypatch,[bad]*3)
-    req=request(tmp_path,'proposer',{'plan_archive':{'plan_ids':[]},'required_plan_count':3})
+    req=legacy_plan_request(tmp_path,'proposer',{'plan_archive':{'plan_ids':[]},'required_plan_count':3})
     with pytest.raises(ValueError,match='Incomplete detailed candidate plan'):
         adapter._collect_plan(client,req,tmp_path,tmp_path,InvocationDeadline(7200))
     assert len(turns)==3 and len(released)==3
@@ -1175,7 +1189,7 @@ def test_native_plan_expired_original_deadline_prevents_repair_turn(tmp_path,mon
     (tmp_path/'controller.py').write_text('value = 1\n')
     clock=[0.0]
     client,turns,_ = _plan_repair_client(monkeypatch,[_repair_plan_document('metadata')],clock)
-    req=request(tmp_path,'proposer',{'plan_archive':{'plan_ids':[]},'required_plan_count':3})
+    req=legacy_plan_request(tmp_path,'proposer',{'plan_archive':{'plan_ids':[]},'required_plan_count':3})
     deadline=InvocationDeadline(10,lambda:clock[0])
     with pytest.raises(TimeoutError,match='Original Codex'):
         adapter._collect_plan(client,req,tmp_path,tmp_path,deadline)

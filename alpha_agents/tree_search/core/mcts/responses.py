@@ -8,9 +8,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from alpha_agents.tree_search.core.mcts.contracts import finite, judge_aggregate
+from alpha_agents.tree_search.core.mcts.contracts import judge_aggregate
 from alpha_agents.tree_search.core.mcts.evidence_scope import (
-    archived_task_roots, continuation_bundle, continuation_prior_ids, value_task_roots,
+    archived_task_roots,
+    continuation_bundle,
+    continuation_prior_ids,
+    value_task_roots,
 )
 from alpha_agents.tree_search.core.mcts.planning_scope import (
     declares_same_parent_duplicate,
@@ -26,6 +29,8 @@ def _refs(context: Any) -> set[str]:
     result = set()
     if isinstance(context, dict):
         for key, value in context.items():
+            if key == "prior_implementations":
+                continue  # Curated report prose is not a transitive citation grant.
             if (key.endswith("_id") or key.endswith("_snapshot_id")) and isinstance(value, str):
                 result.add(value)
             if key.endswith("_path") and isinstance(value, str):
@@ -85,8 +90,7 @@ def canonical_file_evidence(result: dict, request: RoleRequest) -> tuple[dict, l
         return ref
     def visit(value):
         if isinstance(value, dict):
-            return {key: [reference(ref) for ref in child] if key == "evidence" and isinstance(child, list)
-                    else visit(child) for key, child in value.items()}
+            return {key: visit(child) for key, child in value.items()}
         if isinstance(value, list):
             return [visit(child) for child in value]
         if isinstance(value, str):
@@ -103,6 +107,18 @@ def _evidence(refs: Any, request: RoleRequest, workspace: Path):
     if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
         raise ValueError("Role findings require nonempty exact evidence references")
     known = _refs(request.context.get("canonical_evidence", {})) if request.role.startswith("judge_") else _refs(request.context)
+    if not request.role.startswith("judge_"):
+        history = request.context.get("prior_implementations", {})
+        typed_ids = [history.get("snapshot_id")]
+        for entry in history.get("implementations", []):
+            typed_ids.extend(entry.get(key) for key in ("report_id", "attempt_id", "node_id", "artifact_id", "plan_id"))
+            outcome = entry.get("canonical_outcome", {})
+            typed_ids.extend(outcome.get(key) for key in ("u_snapshot_id", "j_snapshot_id"))
+            # These identify supplied summary observations, not permission to
+            # open their underlying evidence or model-authored report paths.
+            for check in entry.get("implementation", {}).get("check_requests", []):
+                typed_ids.extend(check.get(key) for key in ("snapshot_id", "artifact_id"))
+        known.update(ref for ref in typed_ids if isinstance(ref, str) and re.fullmatch(r"[A-Za-z0-9_.-]+", ref))
     roots = value_task_roots(request) + archived_task_roots(request)
     known.update(str(path) for path in value_task_roots(request, files=True))
     known.update(str(path) for path in archived_task_roots(request, files=True))
@@ -229,13 +245,33 @@ def canonical_code_evidence(result: dict, workspace: Path) -> tuple[dict, list[d
         return replacement
     def visit(value):
         if isinstance(value, dict):
-            return {key: [reference(ref) for ref in child] if key == "evidence" and isinstance(child, list)
+            return {key: [reference(ref) for ref in child] if key in {"evidence", "source_evidence", "execution_evidence", "source_inspected", "execution_inspected", "tests_inspected", "inspected"} and isinstance(child, list)
+                    else reference(child) if key == "reference" and isinstance(child, str)
                     else visit(child) for key, child in value.items()}
         if isinstance(value, list):
             return [visit(child) for child in value]
         return value
-    return visit(result), [{"original": original, "canonical": canonical}
-                           for original, canonical in sorted(mappings.items())]
+    canonical_result = visit(result)
+    # A technical design's JSON index also lives inside its frozen Markdown.
+    # Rebase that index together with the parsed metadata, retaining the raw
+    # model document separately and the existing citation provenance mapping.
+    from alpha_agents.tree_search.core.mcts.design_documents import (
+        FORMAT,
+        parse_design_document,
+    )
+    if canonical_result.get("plan_format") == FORMAT:
+        for original_plan, plan in zip(result["plans"], canonical_result["plans"]):
+            before = parse_design_document(original_plan["document"])
+            after = visit(before)
+            if before != after:
+                plan["document"] = re.sub(
+                    r"(^```json\s*\n).*?(^```\s*$)",
+                    lambda match: match.group(1) + json.dumps(after, indent=2) + "\n" + match.group(2),
+                    original_plan["document"], count=1, flags=re.MULTILINE | re.DOTALL)
+                if result.get("native_document") == original_plan["document"]:
+                    canonical_result["native_document"] = plan["document"]
+    return canonical_result, [{"original": original, "canonical": canonical}
+                              for original, canonical in sorted(mappings.items())]
 
 
 def validate_response(result: dict, request: RoleRequest, workspace: Path) -> dict:
@@ -243,6 +279,26 @@ def validate_response(result: dict, request: RoleRequest, workspace: Path) -> di
         raise ValueError("Response artifact identity mismatch")
     role = request.role
     if role == "proposer":
+        from alpha_agents.tree_search.core.mcts.design_documents import (
+            FORMAT,
+            parse_design_document,
+            validate_summary,
+        )
+        if request.context.get("plan_format") == FORMAT:
+            plans = result.get("plans")
+            if result.get("plan_format") != FORMAT or not isinstance(plans, list) or len(plans) != 1:
+                raise ValueError("Proposer must return exactly one technical design document")
+            plan = plans[0]
+            validate_summary({key: value for key, value in plan.items() if key != "document"})
+            if not isinstance(plan.get("document"), str) or not plan["document"].strip():
+                raise ValueError("Technical design document is required")
+            if parse_design_document(plan["document"]) != {key: value for key, value in plan.items() if key != "document"}:
+                raise ValueError("Plan JSON summary differs from its technical design document")
+            _evidence(plan["evidence"], request, workspace)
+            if any(normalize_intervention(plan["intervention"]) == normalize_intervention(existing["intervention"])
+                   for existing in request.context.get("existing_plans", [])):
+                raise ValueError("Proposed intervention duplicates an existing plan at this node")
+            return result
         plans, archive = result.get("plans"), result.get("archive_review")
         if not isinstance(plans, list) or len(plans) > 3 or not isinstance(archive, dict):
             raise ValueError("Invalid proposed plan/archive records")
@@ -274,9 +330,6 @@ def validate_response(result: dict, request: RoleRequest, workspace: Path) -> di
             if not all(p.get(key) for key in ("document", "novelty", "diversity_audit", "intervention")):
                 raise ValueError("Incomplete detailed candidate plan")
             normalize_intervention(p["intervention"])
-            scope = p["intervention"]["scope"]
-            if not isinstance(scope, list) or any(not isinstance(v, str) or not v or Path(v).is_absolute() or ".." in Path(v).parts for v in scope):
-                raise ValueError("Plan edit scope must contain relative harness paths")
             if not set(p.get("closest_plan_ids", [])) <= catalog:
                 raise ValueError("Novelty comparison references unknown archive plans")
             _evidence(p.get("evidence"), request, workspace)
@@ -310,6 +363,12 @@ def validate_response(result: dict, request: RoleRequest, workspace: Path) -> di
             if not result.get("changes") or result["blockers"] or not verification or not all(c["ran"] and c["status"] == "completed" for c in verification):
                 raise ValueError("Completed implementation needs assigned changes and meaningful completed checks")
         _evidence(result.get("evidence"), request, workspace)
+    elif role == "judge_review":
+        from alpha_agents.tree_search.core.mcts.judge_review import validate_review
+        if (result.get("rubric_version") != request.context["rubric"]
+                or result.get("canonical_evidence_id") != request.context["canonical_evidence"]["snapshot_id"]):
+            raise ValueError("Unified judge rubric/canonical evidence identity mismatch")
+        validate_review(result, lambda refs: _evidence(refs, request, workspace))
     elif role.startswith("judge_"):
         phase = "code" if role == "judge_code" else "execution"
         if result.get("phase") != phase or result.get("rubric_version") != request.context["rubric"]:
@@ -326,13 +385,9 @@ def validate_response(result: dict, request: RoleRequest, workspace: Path) -> di
                 if item["score"] is not None:
                     _evidence(item["evidence"], request, workspace)
     elif role == "value":
-        if result.get("status") != "completed":
+        from alpha_agents.tree_search.core.mcts.value_forecast import validate_forecast
+        validate_forecast(result, request.context, request.artifact_id,
+                          lambda refs: _evidence(refs, request, workspace))
+        if result["status"] != "completed":
             raise ValueError("Frontier value assessment is incomplete; preserve the pending trial")
-        for key in ("score_snapshot_id", "capacity_snapshot_id", "objective_id", "discount_factor", "continuation_policy_id"):
-            if result.get(key) != request.context[key]:
-                raise ValueError(f"Value {key} mismatch")
-        finite(result.get("value"), "frontier value")
-        if not result.get("rationale") or not result.get("uncertainty"):
-            raise ValueError("Value requires evidence-grounded rationale and uncertainty")
-        _evidence(result.get("evidence"), request, workspace)
     return result

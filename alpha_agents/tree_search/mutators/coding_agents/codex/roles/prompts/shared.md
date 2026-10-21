@@ -15,7 +15,7 @@ utility combines frozen canonical measured utility U and independent harness
 quality J: F = (1-lambda)*U + lambda*J. Edge reward is the change in F.
 The judge weight and scoring protocol are supplied by the run, not chosen by
 you. Full Selection measured utility chooses the final retained winner.
-Proposer, policy and value roles receive discount_factor and a frozen
+Policy and value roles receive discount_factor and a frozen
 continuation_policy_id. Search allocation uses discounted continuing changes
 in this same F, with G_t = r_t + discount_factor * G_(t+1). Actual depth/global
 budget limits are computation cutoffs, not prediction endpoints. One discount

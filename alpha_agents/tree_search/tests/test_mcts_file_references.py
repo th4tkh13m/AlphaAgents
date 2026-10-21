@@ -24,7 +24,7 @@ def binding(tmp_path):
     item = {'reference_id': 's0-file-0001', 'path': path.name,
             'absolute_file': str(path), 'size': path.stat().st_size,
             'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
-    request = RoleRequest(str(tmp_path), 'call', 'judge_execution', 'artifact', 'model', 'low',
+    request = RoleRequest(str(tmp_path), 'call', 'judge_review', 'artifact', 'model', 'low',
         {'rubric': 'rubric', 'canonical_evidence': {'snapshot_id': 'sealed-stage',
             'evidence': [str(root)], 'file_catalog': [{'evidence_root_path': str(root), 'files': [item]}]}})
     return request, path
@@ -108,7 +108,7 @@ def test_schema_shares_large_enum_and_excludes_absolute_paths(tmp_path):
     schema = output_schema(request)
     assert len(schema['$defs']['file_reference']['enum']) == 381
     assert sum(len(s) for s in schema['$defs']['file_reference']['enum']) < 15000
-    items = schema['properties']['dimensions']['properties']['decisions']['properties']['evidence']['items']
+    items = schema['properties']['dimensions']['properties']['correctness']['properties']['C01']['properties']['evidence']['items']
     def allowed(reference):
         for option in items['anyOf']:
             if '$ref' in option:
@@ -143,9 +143,13 @@ def test_catalog_ids_are_stable_and_do_not_change_stage_identity(tmp_path):
 
 
 def test_value_continuation_task_file_and_bundle_ids_share_permission_contract(tmp_path):
-    from alpha_agents.tree_search.core.mcts.plan_archive import freeze_continuation_evidence
+    from alpha_agents.tree_search.core.mcts.plan_archive import (
+        freeze_continuation_evidence,
+    )
     from alpha_agents.tree_search.core.mcts.responses import validate_response
-    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
+        role_permissions,
+    )
 
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -160,14 +164,13 @@ def test_value_continuation_task_file_and_bundle_ids_share_permission_contract(t
     context = {'score_snapshot_id': 'score', 'capacity_snapshot_id': 'capacity', 'objective_id': 'objective',
                'discount_factor': .9, 'continuation_policy_id': 'policy',
                'continuation_evidence': {**frozen, 'capacity_snapshot_id': 'capacity', 'canonical_evidence': [str(task_root)]}}
+    from alpha_agents.tree_search.tests.value_fixtures import forecast_payload
+    context['score'] = {'u': .5, 'j': .5, 'objective': {'judge_weight': .1}}
     request = RoleRequest(str(tmp_path), 'value', 'value', 'artifact', 'model', 'low', context)
     profile = role_permissions(request, workspace)
     assert profile['filesystem'][str(task_root)] == 'read'
-    response = {'artifact_id': 'artifact', 'status': 'completed', 'value': .1,
-                **{key: context[key] for key in ('score_snapshot_id', 'capacity_snapshot_id', 'objective_id',
-                                                'discount_factor', 'continuation_policy_id')},
-                'rationale': 'Inspected task and reachable node evidence', 'uncertainty': 'One task only',
-                'evidence': [str(summary), nested_id]}
+    response = forecast_payload(context, 'artifact', .1, str(summary))
+    response['evidence'] = [str(summary), nested_id]
     assert validate_response(response, request, workspace) == response
     with pytest.raises(ValueError, match='rather than directories'):
         validate_response({**response, 'evidence': [str(task_root)]}, request, workspace)
@@ -189,7 +192,9 @@ def test_value_continuation_task_file_and_bundle_ids_share_permission_contract(t
 
 @pytest.mark.parametrize('role', ['policy', 'proposer', 'implementer'])
 def test_archive_attempt_citations_match_existing_read_scope(tmp_path, role):
-    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
+        role_permissions,
+    )
 
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -221,7 +226,9 @@ def test_archive_attempt_citations_match_existing_read_scope(tmp_path, role):
 
 @pytest.mark.parametrize('bad', ['external', 'symlink', 'ancestor_symlink', 'malformed', 'shape', 'missing', 'traversal'])
 def test_invalid_archive_declaration_rejected_by_citations_and_permissions(tmp_path, bad):
-    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
+        role_permissions,
+    )
 
     run = tmp_path / 'run'
     root = run / 'tasks' / 'job' / 'execution' / 'evidence'
@@ -262,7 +269,9 @@ def test_judge_cannot_use_archive_attempt_grants(tmp_path):
 
 
 def test_archive_exact_file_declaration_does_not_grant_its_siblings(tmp_path):
-    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
+        role_permissions,
+    )
 
     root = tmp_path / 'tasks' / 'job' / 'execution' / 'evidence'
     root.mkdir(parents=True)
@@ -280,7 +289,9 @@ def test_archive_exact_file_declaration_does_not_grant_its_siblings(tmp_path):
 
 
 def test_value_prior_citations_require_sealed_typed_declaration(tmp_path):
-    from alpha_agents.tree_search.core.mcts.plan_archive import freeze_continuation_evidence
+    from alpha_agents.tree_search.core.mcts.plan_archive import (
+        freeze_continuation_evidence,
+    )
 
     payload = {'snapshot_id': 'capacity', 'prior_version': 'prior-root',
                'reachable_subtree': [{'prior_version': 'prior-child'}],

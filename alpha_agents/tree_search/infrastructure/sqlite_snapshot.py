@@ -21,7 +21,7 @@ def snapshot_connection(source):
     source = Path(source)
     for _ in range(8):
         with tempfile.TemporaryDirectory(prefix="alpha-snapshot-") as temporary:
-            paths = [source, Path(str(source) + "-wal")]
+            paths = [source, Path(str(source) + "-wal"), Path(str(source) + "-journal")]
             before = [signature(path) for path in paths]
             if before[0] is None:
                 raise FileNotFoundError(source)

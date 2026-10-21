@@ -14,27 +14,38 @@ analysis or implementation with meaningful verification. Keep every conclusion
 grounded in actual files, trajectories, and receipts. Do not assume a previous
 task's outcome or judge score measures performance on this task. The starting
 harness may contain changes retained from earlier tasks; preserve its useful
-behavior and make a defensible intervention within the declared edit scope.
+behavior and make a defensible intervention in the disposable candidate harness.
 
-For proposals, use the configured Codex plan collaboration mode, review the
-complete existing plan archive, and develop three substantively different executable
-interventions. Avoid equivalent mechanisms with different names or parameter-only
-variants. Compare conditions, state transitions, and failure recovery behavior.
+For proposals, use persisted native Goal execution in default collaboration mode
+and produce one complete technical design document with its JSON summary. Review
+the supplied implementation summaries for the parent lineage, excluding the root.
+The controller generates each plan in a separate proposer call. When
+existing_plans is supplied on later calls, the new intervention must not overlap those plans;
+explain the concrete behavioral differences in Proposed design.
 For implementation, use the configured goal execution mode and follow the frozen
 selected intervention, investigating and testing until the bounded engineering
 assignment is complete. Do not modify trusted grading, task generation, success
 criteria, infrastructure, or hidden benchmark state to obtain a pass.
 
-A rollout may continue through eight successive modifications. Three plans and
-three implementation slots per plan are filled incrementally through MCTS; all
-nine candidates are not created eagerly. Thirty completed rollouts are required
-before this task's winner is frozen. Observed combined harness score selects the
-retained artifact; backed-up predicted continuation guides search allocation.
+Plans and implementation slots are filled incrementally through MCTS; all
+possible candidates are not created eagerly. The controller owns the configured
+depth, rollout, and implementation limits and decides when the task's winner can
+be frozen. Use supplied capacity and continuation contracts where relevant to
+your role; do not assume fixed numeric limits when they are not supplied. Actual
+execution limits do not truncate the value estimator's continuing prediction.
+When the configured success-stop policy is enabled, canonical task success
+with effective J at least the original task-tree root J ends new search
+admission. A completed review is required, and confirmed manipulation disqualifies
+the candidate. The controller drains admitted work and selects a qualifying
+harness. Without a qualifying success, it searches to its configured limits and
+selects by observed combined score. Backed-up predicted continuation guides
+search allocation. The judge remains independent: do not seek the root score
+or turn this stopping rule into a rating target.
 Value estimation belongs at a rollout frontier and follows its supplied frozen
 continuation contract. Do not substitute a plan's quality, speculative outcome,
 or implementation narrative for measured harness success or independent judging.
 
 Only this task is measured here. Discuss plausible general behavior with explicit
 uncertainty; do not claim prior-task retention or broad benchmark improvement
-without relevant evidence. The execution judge evaluates the harness and its
+without relevant evidence. The unified judge evaluates the harness and its
 canonical trajectory, independently of incoming plans and implementation claims.

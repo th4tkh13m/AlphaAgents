@@ -6,15 +6,15 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
+from ..shared.storage import run_lock, write_json
 from .artifacts import manifest
 from .contracts import fingerprint
-from ..shared.storage import run_lock, write_json
 
 
 class TaskSequence:
     def __init__(self, output, source, tasks, identity, application_factory, monitor=None, *, skip_successful_roots=False):
         if not tasks or len(tasks) != len(set(tasks)):
-            raise ValueError("Freeze a nonempty, unique ordered failed-task list")
+            raise ValueError("Freeze a nonempty, unique ordered task list")
         self.directory, self.source = Path(output), Path(source)
         self.tasks, self.identity = list(tasks), identity
         self.application_factory = application_factory
@@ -80,13 +80,13 @@ class TaskSequence:
     def _save(self, state):
         write_json(self.directory / "sequence.json", state)
         lines = ["# Sequential single-task MCTS monitor", "",
-                 f"State: **{state['state']}**. Frozen failed tasks: **{len(self.tasks)}**.", "",
-                 "Four emulators; 3 plans × 3 implementation slots per node; depth 8; 30 rollouts per task.",
+                 f"State: **{state['state']}**. Frozen tasks: **{len(self.tasks)}**.", "",
+                 "Each task stops on canonical success with J >= its original root J and no confirmed manipulation, or at configured search limits.",
                  "Each tree evaluates only its named task. The selected exact harness becomes the next root.",
                  "Earlier-task retention and generalization are not measured by this experiment.", "",
                  "| Task | State | Tree directory | Winner |", "| --- | --- | --- | --- |"]
         if self.skip_successful_roots:
-            lines.insert(6, "Fresh passing roots bypass search; only failed roots require 30 rollouts. Skips preserve actual completed-rollout counts.")
+            lines.insert(6, "Fresh qualified passing roots bypass search. Skips and early success preserve actual completed-rollout counts.")
         for step in state["steps"]:
             status = step["state"] + (" (root passed; search skipped)" if step.get("search_skipped") else "")
             lines.append(f"| {step['task']} | {status} | `{step['directory']}` | `{step.get('winner', '')}` |")
@@ -100,7 +100,7 @@ class TaskSequence:
 
     def _run(self, *, resume=False, stop_after_trials=None, finalize=None):
         if stop_after_trials is not None or finalize is False:
-            raise ValueError("Task sequences finish all configured rollouts before selecting and advancing")
+            raise ValueError("Task sequences require completed winner selection before advancing")
         with run_lock(self.directory):
             identity = self._identity(self.identity, skip=self.skip_successful_roots)
             path = self.directory / "sequence.json"
@@ -111,7 +111,8 @@ class TaskSequence:
                 if state["identity"] != identity:
                     raise ValueError("Task sequence identity changed")
             else:
-                state = {"identity": identity, "tasks": self.tasks, "state": "running", "steps": [
+                state = {"identity": identity, "tasks": self.tasks, "state": "running",
+                         "search_configuration": dict(self.identity.get("controller", {})), "steps": [
                     {"task": task, "state": "pending", "directory": f"tasks/{index + 1:02d}-{task}"}
                     for index, task in enumerate(self.tasks)]}
                 if self.skip_successful_roots:
@@ -142,7 +143,7 @@ class TaskSequence:
                         if self.stop.is_set():
                             break
                         exists = True
-                        if root["u"] == 1:
+                        if root["u"] == 1 and root.get("success_stop_qualified", True):
                             final = self.current.retain_successful_root()
                     if final is None:
                         result = self.current.run(resume=exists, finalize=True)
@@ -160,6 +161,9 @@ class TaskSequence:
                                 winner_manifest=fingerprint(manifest(source)),
                                 selected_actions=final["selected_actions"],
                                 completed_rollouts=final["completed_rollouts"])
+                    if final.get("success_stop"):
+                        step.update(success_stop=final["success_stop"], stopped_early=final["stopped_early"],
+                                    selection_mode=final["selection_mode"])
                     if final.get("search_skipped"):
                         step.update(search_skipped=True, selection_mode=final["selection_mode"], reason=final["reason"])
                     self._save(state)

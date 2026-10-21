@@ -1,4 +1,4 @@
-"""Codex native Plan parsing and assessment JSON schema construction."""
+"""Proposer document parsing and assessment JSON schema construction."""
 from __future__ import annotations
 
 import json
@@ -27,9 +27,17 @@ def _json_metadata(section: str) -> dict:
 
 
 def parse_native_plan(text: str, request: RoleRequest) -> dict:
-    """Use the full completed plan item, never concatenated streaming deltas."""
-    if request.execution_mode != "plan":
-        raise ValueError("Native plan output belongs only to the proposer")
+    """Parse a complete Goal document or a historical native Plan item."""
+    if request.role != "proposer" or request.execution_mode not in {"goal", "plan"}:
+        raise ValueError("Plan document output belongs only to the proposer")
+    from alpha_agents.tree_search.core.mcts.design_documents import (
+        FORMAT,
+        parse_design_document,
+    )
+    if request.context.get("plan_format") == FORMAT:
+        metadata = parse_design_document(text)
+        return {"artifact_id": request.artifact_id, "status": "completed", "plan_format": FORMAT,
+                "plans": [{**metadata, "document": text}], "native_document": text}
     sections = []
     fence = None
     start = None
@@ -92,11 +100,13 @@ def output_schema(request: RoleRequest) -> dict:
         return obj({"artifact_id": artifact, "evidence_snapshot_id": identity("evidence_snapshot_id"), "plan_ids": strings,
                     "priors": priors, "comparisons": string, "uncertainty": string, "evidence": strings})
     if request.role == "value":
-        return obj({"artifact_id": artifact, "status": {"type": "string", "enum": ["completed", "partial", "failed"]},
-                    "score_snapshot_id": identity("score_snapshot_id"), "capacity_snapshot_id": identity("capacity_snapshot_id"),
-                    "objective_id": identity("objective_id"), "continuation_policy_id": identity("continuation_policy_id"),
-                    "discount_factor": {"type": "number", "enum": [request.context["discount_factor"]]}, "value": {"type": ["number", "null"]},
-                    "rationale": string, "uncertainty": string, "evidence": strings})
+        from alpha_agents.tree_search.core.mcts.value_forecast import forecast_schema
+        schema = forecast_schema()
+        schema["properties"]["artifact_id"] = artifact
+        for key in ("score_snapshot_id", "capacity_snapshot_id", "objective_id", "continuation_policy_id"):
+            schema["properties"][key] = identity(key)
+        schema["properties"]["discount_factor"] = {"type": "number", "enum": [request.context["discount_factor"]]}
+        return schema
     if request.role.startswith("judge_"):
         catalog = file_reference_catalog(request)
         definitions = {}
@@ -107,16 +117,13 @@ def output_schema(request: RoleRequest) -> dict:
                 {"$ref": "#/$defs/file_reference"},
                 {"type": "string", "pattern": r"^(?:code:)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+(?::[0-9]+(?::[0-9]+)?)?$"},
                 {"type": "string", "enum": [request.context["canonical_evidence"]["snapshot_id"]]}]}}
-        dimension = obj({"score": {"type": ["number", "null"], "enum": [None, 0, .25, .5, .75, 1]},
-                         "rationale": string, "confidence": string, "evidence": evidence,
-                         "unknown_reason": {"type": ["string", "null"]}})
-        coverage = obj({"inspected": strings, "unseen": strings})
-        schema = obj({"artifact_id": artifact, "canonical_evidence_id": {"type": ["string", "null"]},
-                    "rubric_version": string, "phase": {"type": "string", "enum": ["code" if request.role == "judge_code" else "execution"]},
-                    "status": {"type": "string", "enum": ["completed", "partial", "failed"]},
-                    "dimensions": obj({k: dimension for k in ("robustness", "decisions", "generalizable")}),
-                    "findings": string, "coverage": coverage, "blockers": strings})
-        if definitions:
-            schema["$defs"] = definitions
-        return schema
+        if request.role == "judge_review":
+            from alpha_agents.tree_search.core.mcts.judge_review import review_schema
+            schema = review_schema(evidence)
+            schema["properties"]["artifact_id"] = artifact
+            schema["properties"]["rubric_version"] = {"type": "string", "enum": [request.context["rubric"]]}
+            schema["properties"]["canonical_evidence_id"] = {"type": "string", "enum": [request.context["canonical_evidence"]["snapshot_id"]]}
+            if definitions:
+                schema["$defs"] = definitions
+            return schema
     raise ValueError("Native Plan/Goal execution does not use an assessment turn schema")

@@ -6,8 +6,11 @@ import json
 import re
 from pathlib import Path
 
-from alpha_agents.tree_search.core.mcts.evidence_scope import archived_task_roots, continuation_bundle, value_task_roots
-
+from alpha_agents.tree_search.core.mcts.evidence_scope import (
+    archived_task_roots,
+    continuation_bundle,
+    value_task_roots,
+)
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import (
     RoleRequest,
 )
@@ -70,8 +73,11 @@ def role_permissions(request: RoleRequest, workspace: Path) -> dict:
 
     def visit(value):
         if isinstance(value, dict):
-            for child in value.values():
-                visit(child)
+            for key, child in value.items():
+                # Curated model reports and plan summaries are inline evidence,
+                # never authority to grant access to another invocation's files.
+                if key not in {"prior_implementations", "existing_plans"}:
+                    visit(child)
         elif isinstance(value, (list, tuple)):
             for child in value:
                 visit(child)
@@ -95,7 +101,7 @@ def role_permissions(request: RoleRequest, workspace: Path) -> dict:
             continuation = len(relative) == 3 and relative[0] == "evidence_archive" and relative[2] == "CONTINUATION.json"
             code_view = (len(relative) == 2 and relative[0] == "value_code_views" and len(relative[1]) == 64
                          and all(char in "0123456789abcdef" for char in relative[1]) and resolved.is_dir())
-            if not task_evidence and not ((archived_plan or archived_attempt) and request.role not in {"judge_code", "judge_execution"}) and not ((continuation or code_view) and request.role == "value"):
+            if not task_evidence and not ((archived_plan or archived_attempt) and not request.role.startswith("judge_")) and not ((continuation or code_view) and request.role == "value"):
                 raise ValueError("Role context requested a forbidden filesystem read grant")
             if path.is_symlink():
                 raise ValueError("Evidence read grant cannot use a symbolic link")

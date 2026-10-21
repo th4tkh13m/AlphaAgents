@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import tempfile
-from pathlib import Path
 
 from alpha_agents.tree_search.core.mcts.artifacts import manifest
 from alpha_agents.tree_search.core.mcts.plan_archive import freeze_continuation_evidence
@@ -48,24 +44,16 @@ def continuation_context(store, artifacts, capacity):
         artifact = node["artifact_id"]
         records = artifacts.verify(artifact)
         destination = root / artifact
-        if not destination.exists():
-            staging = Path(tempfile.mkdtemp(prefix=".value-", dir=root))
-            try:
-                artifacts.materialize(artifact, staging / "content")
-                try:
-                    os.rename(staging / "content", destination)
-                except OSError:
-                    if not destination.is_dir():
-                        raise
-            finally:
-                shutil.rmtree(staging)
+        artifacts.readonly_view(artifact, root)
         if manifest(destination) != records:
             raise ValueError("Value code view differs from the frozen artifact")
         views.append({"node_id": node["node"], "artifact_id": artifact, "code_path": str(destination.resolve())})
     references = sorted({reference for evidence in capacity["reachable_evidence"].values()
                          for evaluation in evidence["evaluations"]
                          for reference in evaluation["payload"].get("evidence", [])})
-    return {"capacity": {key: value for key, value in capacity.items() if key != "reachable_evidence"},
+    return {"prior_implementations": capacity["prior_implementations"],
+            "value_report_contract": capacity["value_report_contract"],
+            "capacity": {key: value for key, value in capacity.items() if key != "reachable_evidence"},
             "reachable_attempt_ids": sorted({attempt["id"] for node in capacity["reachable_subtree"]
                                               for plan in node["plans"] for attempt in plan["attempts"]}),
             "continuation_evidence": {**frozen, "capacity_snapshot_id": capacity["snapshot_id"],

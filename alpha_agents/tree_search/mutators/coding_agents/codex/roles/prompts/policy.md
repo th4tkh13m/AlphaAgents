@@ -16,6 +16,10 @@ what previous attempts did not establish. Cached repeated visits are not new
 independent samples. Do not assume an untried mechanism works.
 
 Use the supplied discount_factor and continuation_policy_id when forming priors.
+Honor any supplied success_stop rule: when enabled, canonical task success with
+effective J at least the original root J ends new search admission, excluding
+confirmed manipulation. Do not allocate hypothetical improvements beyond that
+qualifying absorbing state. A task pass below the root J does not satisfy it.
 Compare near-term gains, necessary intermediate regressions, delayed benefits,
 and diminishing returns under the declared continuation procedure. Do not use
 final-minus-current utility as a substitute for discounted return or silently

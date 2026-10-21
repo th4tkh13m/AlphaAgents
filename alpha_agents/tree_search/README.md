@@ -4,11 +4,16 @@ DGM evolves a harness through code mutations and independent evaluations. The co
 
 For a detailed explanation of parent selection, mutation, evaluation, archives, and scheduling, read [DGM tree search algorithm](DGM_ALGORITHM.md).
 
+For the fixed-PUCT MCTS controller, staged AndroidWorld evaluation, and native
+Codex roles, see [MCTS operation](core/mcts/README.md). Select it explicitly with
+`controller.type="fixed_puct"`; existing DGM configurations retain their behavior.
+
 ## Structure
 
 ```text
 tree_search/
-  core/               Contracts, controller, workspaces, and persistence
+  core/               DGM contracts, controller, workspaces, and persistence
+    mcts/             Fixed-PUCT controller, transactional state, and artifacts
   infrastructure/     Shared process execution and command expansion
   bridges/
     command.py        Generic external evaluator and resource leases
@@ -16,9 +21,11 @@ tree_search/
   mutators/
     command.py        Arbitrary external editing command
     coding_agents/
-      codex/          Backend, SDK worker, watcher, and prompt
+      codex/          Existing mutation backend, SDK helpers, worker, and watcher
+        roles/        Plan/Goal role adapter and external prompt assets
   validators/         Optional regression checks
-  cli.py              Configuration and implementation composition
+  composition.py      Fixed-PUCT adapter composition
+  cli.py              Shared commands and controller selection
   examples/           Offline harness and example configurations
   tests/              Search, boundary, backend, and recovery regressions
 ```
@@ -29,9 +36,13 @@ The actual harness source is supplied separately. It is copied into an immutable
 
 Requires Python 3.10+ and Git on PATH. From the `AlphaAgents` repository root:
 
+Create new experiments under `runs/experiments/<experiment-name>/`. Keep the
+configuration, logs, search state, artifacts, benchmark evidence, and plots in
+that experiment directory. Use the same directory when resuming an experiment.
+
 ```bash
 python -m pip install -e '.[test]'
-python -m alpha_agents.tree_search --config alpha_agents/tree_search/examples/command.json --output /tmp/dgm-demo
+python -m alpha_agents.tree_search --config alpha_agents/tree_search/examples/command.json --output runs/experiments/dgm-demo
 ```
 
 The offline example uses Python 3 (`python3` in the example commands). It starts with a score of 0 and makes one deterministic mutation that scores 1. The mutation script demonstrates the interface; it is not a learning agent. Use a fresh output directory for each new run.
@@ -46,9 +57,68 @@ For AndroidWorld, copy and edit `examples/androidworld.json`. Supply the externa
 
 Paths in a CLI config are relative to that config file. Existing local command script paths are resolved before execution. Command arguments are passed as an argument list without a shell. `{workspace}`, `{artifacts}`, and `{resource}` are supported evaluator placeholders; mutation commands support `{workspace}`, `{artifacts}`, and `{context}`. Literal braces must be doubled.
 
+## Automatic live profiling (fixed PUCT)
+
+The production fixed-PUCT application automatically starts a Perfetto trace
+watcher on `preflight()`, `run()`, or `finalize()`, including resumed runs. Normal
+CLI runs need no additional command or Python package. The implementation lives
+in `infrastructure/perfetto.py` (lifecycle and publication) and
+`infrastructure/trace_export.py` (record-to-trace conversion). Composition owns
+the watcher alongside the scheduler; search logic does not depend on profiling.
+Use the application as a context manager or call `close()` to drain resources,
+flush the final trace, stop the watcher, and close the state store.
+
+Every five seconds, `<run>/profiling/live_trace.json` and
+`live_trace.json.gz` are replaced atomically. Open either file at
+<https://ui.perfetto.dev>. Uploaded traces are snapshots: reload the updated
+file to see subsequent observations. `watcher_status.json` reports freshness,
+export duration, file sizes, and failures; `resource_samples.jsonl` retains host
+observations, and `snapshots/` preserves compressed minute snapshots. One
+exclusive observer lock prevents duplicate exporters. Observation errors are
+logged and retried without interrupting the experiment.
+
+Tracks show device task assignment, idle time, quarantine and recovery; task
+execution and recorded subphases; device and implementor queues; Codex lifecycle
+and native worker time; separate baseline and child assessment phases; and
+evaluation stage envelopes. Stage envelopes include recorded dispatch queue
+time and retries. Queue and task slices explain those envelopes and must not
+be added to them. Code review can overlap Android work, and different devices
+can execute concurrently; sum task time to measure device consumption, and use
+wall-time envelopes or interval unions to measure latency. A device task
+assignment covers its scheduler callback, which can include setup/reset and
+cleanup; it does not assert continuous agent or model activity.
+
+CPU (percent of one host core) and RSS are sampled for emulators with matching
+PID/birth records in `devices/status.json`; absent records mean unavailable
+resource measurements, not zero usage. Device assignment tracks still work
+using the configured serials and recorded dispatches. Host memory availability
+and pressure are whole-machine observations. Resource sampling begins when the
+watcher starts; historical CPU data is not inferred. These traces contain
+logical application spans, not kernel scheduling, GPU activity, or call stacks.
+Ongoing spans are clipped to the observation time and marked incomplete.
+Task subphases use a current same-host monotonic/realtime clock anchor; completed
+native worker endpoints reconstructed from metadata modification time are
+explicitly approximate. Native elapsed measurements remain available in role
+metrics. No benchmark database, harness, score, or experiment identity is changed.
+
+To attach the same packaged watcher to an already-running frozen runtime, or
+export a one-time snapshot:
+
+```bash
+python -m alpha_agents.tree_search.infrastructure.perfetto --run runs/experiments/NAME --watch
+python -m alpha_agents.tree_search.infrastructure.perfetto --run runs/experiments/NAME
+```
+
+For an attached watcher, `--owner-record PATH` accepts a live process JSON record
+with `pid` and `process_birth` and stops the watcher when that exact process exits.
+Automatic application-owned watchers stop with `SearchApplication.close()`.
+The exporter uses Python's standard library and the Chrome trace JSON format
+supported by Perfetto. The official `perfetto` Python package is optional for
+trace building or SQL analysis; it is not needed to run this watcher.
+
 ## Bridge API
 
-Implement `HarnessBridge` in `core/contracts.py` and construct `DGMController(bridge, mutator, output, config, validators=())` directly:
+Implement `HarnessBridge` in `core/dgm/contracts.py` and construct `DGMController(bridge, mutator, output, config, validators=())` directly:
 
 1. `source`: the editable harness checkout to snapshot.
 2. `identity()`: stable JSON configuration identifying the evaluator contract.
@@ -66,7 +136,7 @@ from alpha_agents.tree_search import DGMController, SearchConfig
 controller = DGMController(
     my_bridge,
     my_mutator,
-    Path("runs/experiment"),
+    Path("runs/experiments/dgm-example"),
     SearchConfig(max_children=20, workers=2),
 )
 state = controller.run()
@@ -114,6 +184,20 @@ On Windows, AndroidWorld-specific tests are skipped. Tests cover actual offline 
 
 See [STRUCTURE_PLAN.md](STRUCTURE_PLAN.md) for the plan followed by this refactor.
 
+Search implementations have separate homes: [DGM](core/dgm/README.md) in
+`core/dgm/`, and [fixed-PUCT MCTS](core/mcts/README.md) in `core/mcts/`.
+`core/shared/` holds only their common atomic JSON, run-lock, and Git helpers.
+The public Python imports remain available from `alpha_agents.tree_search`;
+internal DGM imports now use `alpha_agents.tree_search.core.dgm`.
+
+Fixed-PUCT integrations implement the explicit agent and evaluator contracts in
+`core/mcts/ports.py`. Core owns search decisions and state; agent adapters own
+model execution and prompts; evaluation bridges own benchmark/runtime recovery.
+`composition.build()` returns a context-managed `SearchApplication` that owns
+external resources and closes the scheduler before search state. See the
+[MCTS integration boundaries](core/mcts/README.md#integration-boundaries-and-motivation)
+for replacement adapters, lifecycle ownership, and frozen-identity compatibility.
+
 The controller writes `mutation_context.json` once, captures the canonical `model_patch.diff`, persists validation reports, and decides candidate status. Mutators consume the context and edit source; their telemetry remains backend-specific. Bridges supply harness instructions and resources and perform independent benchmark evaluation. Infrastructure shares process execution and command expansion.
 
 The coding-agent prompt requires observe, analyze, plan, implement, and validate. The agent validates through both relevant test cases and a representative harness test run, inspects the results, and reports any blockers. This is an agent responsibility; there is no live-evidence validator enforcing an experiment-summary file.
@@ -131,3 +215,28 @@ An absent validation list means no engineering checks are imposed. `changed_pyte
 Codex lives entirely in `mutators/coding_agents/codex/`. To add a dedicated Claude Code or other coding-agent backend, add a sibling package that implements `MutationBackend.identity()` and `mutate(candidate, context)`. Use the supplied context directly, or consume its controller-written JSON representation through `candidate.mutation_context`, launch the agent, and return `MutationOutcome`. Leave canonical patch capture to the controller. No controller or bridge changes are needed. Until a dedicated integration is implemented, `CommandMutator` can invoke any configured editing CLI with `{workspace}`, `{artifacts}`, and `{context}` arguments.
 
 The Python API accepts custom bridges, mutators, and validators directly. CLI built-in implementations are composed in `cli.py`; adding a named CLI backend requires extending that composition code. Generic imports do not load optional SDKs or Linux-only runtimes.
+
+### Supervised task timeout handoff
+
+A singleton task keeps the 2,100-second device envelope: 120 seconds for startup, 1,800 for task execution, and 180 for cleanup. The trusted runner reserves one second inside the task envelope for publishing the cleanup phase (1,799 seconds of agent execution). When execution expires, it enters cleanup before awaiting cancellation; recording and trace finalization use the existing cleanup allowance. Completed timeout cleanup yields the existing trusted agent-failure outcome with zero success and no invented AndroidWorld grader reward. Stuck cancellation, blocked event loops, or unconfirmed cleanup remain infrastructure failures. The receipt records the handoff reserve, and runner source hashing separates this behavior from frozen experiments.
+
+### Private Codex inspection scratch
+
+Prompt library v18 gives each invocation its own writable `role_requests/<request_id>/scratch` folder and publishes that exact path in the role envelope. Assessment and planning roles retain read-only source/evidence access; scratch writes support safe SQLite DB/WAL/SHM copies, standalone backups and other derived inspection files. The scratch grant excludes the surrounding request directory and other invocations. Scratch output is not canonical evidence and cannot be cited as a task sample. Request IDs cannot traverse paths, and scratch-directory symlinks are rejected. Real sandbox probes verified source-write denial, assigned scratch writes and WAL-backed inspection with unchanged original hashes. Frozen older runs keep their original profiles and versions.
+
+The v29 fixed-PUCT runtime shares read-only artifact views and sealed SQLite
+inspection snapshots, and retires checkpointed temporary workspaces. See the
+[storage lifecycle](core/mcts/README.md#storage-lifecycle-v29) for recovery and
+evidence-retention guarantees. Existing runs are not retroactively cleaned.
+
+
+For the complete 25-task development curriculum, use
+[`examples/all_development_sequence.json`](examples/all_development_sequence.json).
+It evaluates the carried harness afresh on all Screen and Selection tasks,
+ordered by difficulty (easy, medium, hard), optimal human steps, then task name.
+Passing roots skip MCTS; failed roots use three plans, two implementation slots
+per plan, depth four, and up to thirty rollouts. A task's selected exact artifact
+becomes the next root. Confirmation tasks and historical pass/fail labels do not
+select the curriculum or skip new measurements. `task_order.json` freezes the
+ordering metadata; altered metadata is rejected on rebuild. Existing cached-failure
+sequences remain available through `sequence.task_scope=cached_failures`.

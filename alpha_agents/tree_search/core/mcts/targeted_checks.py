@@ -3,24 +3,28 @@
 from __future__ import annotations
 
 import json
-import shutil
 import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 from alpha_agents.tree_search.core.mcts.contracts import canonical_json, fingerprint
+from alpha_agents.tree_search.core.mcts.resource_retention import (
+    readonly_projection,
+    retire_workspace,
+)
 from alpha_agents.tree_search.core.mcts.storage import TreeStore
 from alpha_agents.tree_search.core.mcts.task_cache import evidence_inventory
 from alpha_agents.tree_search.core.shared.storage import write_json
+from alpha_agents.tree_search.infrastructure.evidence_sqlite import inspection_catalog
 
 
 class TargetedChecks:
-    def __init__(self, store, artifacts, evaluator, workspace, request, allowed_tasks, scope_valid):
+    def __init__(self, store, artifacts, evaluator, workspace, request, allowed_tasks):
         self.directory, self.config, self.objective = store.directory, store.config, store.objective
         self.artifacts, self.evaluator = artifacts, evaluator
         self.workspace, self.request = Path(workspace), request
-        self.allowed_tasks, self.scope_valid = set(allowed_tasks), scope_valid
+        self.allowed_tasks = set(allowed_tasks)
         self.root = self.directory / "role_requests" / request.request_id / "check_results"
         self.root.mkdir(parents=True, exist_ok=True)
         self.inbox = self.root.parent / "check_input"
@@ -96,8 +100,6 @@ class TargetedChecks:
                       "invocation_id": self.request.request_id, "sample_kind": "targeted"}
             try:
                 artifact = self.artifacts.freeze(self.workspace)
-                if not self.scope_valid(self.request.artifact_id, artifact):
-                    raise ValueError("Intermediate patch exceeds the frozen intervention scope")
                 with store.transaction():
                     store.db.execute("UPDATE targeted_check_requests SET artifact=? WHERE id=?", (artifact, identity))
                 result["artifact_id"] = artifact
@@ -117,7 +119,7 @@ class TargetedChecks:
                 if evidence.artifact_id != artifact or evidence.stage != "targeted":
                     raise ValueError("Targeted evidence identifies another artifact or stage")
                 store.save_evaluation(evidence.identity, artifact, "targeted", asdict(evidence))
-                copies = []
+                copies, projections, inspections = [], [], []
                 for index, reference in enumerate(evidence.evidence):
                     source = Path(reference)
                     if not source.is_absolute():
@@ -132,18 +134,27 @@ class TargetedChecks:
                     inventory = evidence_inventory(source)
                     destination = self.root / identity / f"task-{index}"
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(source, destination)
+                    projections.append(readonly_projection(source, destination))
                     if evidence_inventory(destination) != inventory:
                         raise ValueError("Targeted evidence changed during handoff")
+                    inspections.extend(inspection_catalog(destination, inventory))
                     copies.append(str(destination))
                 result.update(status="completed", snapshot_id=evidence.identity, outcomes=dict(evidence.outcomes),
-                              evidence=list(evidence.evidence), readable_evidence=copies)
+                              evidence=list(evidence.evidence), readable_evidence=copies,
+                              readable_storage=projections, sqlite_inspection=inspections)
+                if self.artifacts.freeze(execution) != artifact:
+                    raise ValueError("Targeted stage input changed from its frozen artifact")
             except Exception as failure:
                 result.update(status="failed", error=f"{type(failure).__name__}: {failure}")
             with store.transaction():
                 store.db.execute("UPDATE targeted_check_requests SET state=?,result=?,finished=? WHERE id=?",
                                  (result["status"], canonical_json(result), time.time(), identity))
             write_json(self.root / (identity + ".json"), result)
+            if result["status"] == "completed":
+                # Both the authoritative DB result and its handoff receipt are
+                # durable before this temporary outer input can be retired.
+                retire_workspace(self.directory, execution, self.artifacts, artifact,
+                                 self.root / (identity + ".workspace_retention.json"))
             return result
         finally:
             store.close()

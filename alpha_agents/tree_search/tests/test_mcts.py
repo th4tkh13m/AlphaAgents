@@ -9,7 +9,7 @@ import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from threading import Barrier
 
@@ -115,7 +115,7 @@ def test_judge_file_catalog_preserves_exact_execution_paths_and_sealed_identity(
     assert canonical_json(asdict(stage)) == sealed
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    request = RoleRequest(str(tmp_path), "request", "judge_execution", "artifact", "gpt-6-luna", "low",
+    request = RoleRequest(str(tmp_path), "request", "judge_review", "artifact", "gpt-6-luna", "low",
                           {"canonical_evidence": context})
     _evidence([str(database), str(ledger)], request, workspace)
     shortened = str(database).replace("b" * 32, "b" * 20)
@@ -137,6 +137,19 @@ def draft(id="plan-a", mechanism="bounded recovery"):
             "novelty": "A different executable recovery condition, not a renamed hypothesis.",
             "diversity_audit": "Compared mechanisms rather than titles.", "evidence": ["screen/failure"],
             "closest_plan_ids": []}
+
+
+def technical_draft(slot):
+    from alpha_agents.tree_search.core.mcts.design_documents import SECTIONS
+    metadata = {"id": f"proposal-{slot}", "title": f"Intervention {slot}",
+                "summary": "Implement the concrete inspected mechanism.",
+                "intervention": {"target": "controller.py", "operation": f"operation-{slot}",
+                                 "conditions": "Relevant observed state", "mechanism": f"mechanism-{slot}"},
+                "expected_benefit": "Improve task completion.", "validation": "Exercise the mechanism.",
+                "risks_and_limitations": "Broader gain remains unmeasured.", "evidence": ["controller.py"]}
+    document = f'# {metadata["title"]}\n```json\n{json.dumps(metadata)}\n```\n'
+    document += "\n".join(f"## {heading}\nDetailed inspected implementation specification.\n" for heading in SECTIONS)
+    return {**metadata, "document": document}
 
 
 def expand(store, node="root", drafts=None):
@@ -166,7 +179,7 @@ def child_transition(store, trial, selection, id="child", u=.7, j=.8):
 @pytest.mark.parametrize("kwargs", [
     {"screen_gate": "guess"}, {"max_trials": 31}, {"max_depth": True},
     {"c_puct": float("nan")}, {"prior_floor": 0}, {"codex_run_timeout_seconds": 600},
-    {"trial_workers": 10}, {"device_limit": 10}, {"max_plans": 2}, {"max_implementations": 2},
+    {"trial_workers": 10}, {"device_limit": 10}, {"max_plans": 2}, {"max_implementations": 4},
     {"discount_factor": 0}, {"discount_factor": 1}, {"discount_factor": True},
     {"discount_factor": -.1}, {"discount_factor": float("nan")}, {"discount_factor": float("inf")},
 ])
@@ -695,16 +708,16 @@ def test_two_hour_prompt_permissions_and_judge_input_isolation():
         request = RoleRequest("run", "request", role, "artifact", "configured-model", "configured-effort", {})
         rendered[role] = request.render()
         assert request.permission_mode == ("workspace-write" if role == "implementer" else "read-only")
-        assert request.collaboration_mode == ("plan" if role == "proposer" else "default")
+        assert request.collaboration_mode == "default"
         assert request.prompt_hash
         assert request.library_hash
         assert '"timeout_seconds":7200' in request.render()
-    assert "closest relevant documents" in rendered["proposer"]
-    assert "Do not replace it with an easier intervention" in rendered["implementer"]
+    assert "controller curates these" in rendered["proposer"]
+    assert "Do not silently substitute" in rendered["implementer"]
     with pytest.raises(ValueError, match="artifact-only"):
-        RoleRequest("run", "request", "judge_execution", "artifact", "model", "effort", {"plan": "biased"})
+        RoleRequest("run", "request", "judge_review", "artifact", "model", "effort", {"plan": "biased"})
     with pytest.raises(ValueError, match="excluded"):
-        RoleRequest("run", "request", "judge_execution", "artifact", "model", "effort",
+        RoleRequest("run", "request", "judge_review", "artifact", "model", "effort",
                     {"canonical_evidence": {"plan_alignment": True}})
     with pytest.raises(ValueError, match="two-hour"):
         RoleRequest("run", "request", "value", "artifact", "model", "effort", {}, timeout_seconds=600)
@@ -898,15 +911,15 @@ def contract_response(request, response):
         response.update(plan_id=context["plan_id"], attempt_id=context["attempt_id"],
                         changes=["Increment deterministic harness state"], blockers=[], evidence=["controller.py"],
                         verification=[{"ran": True, "status": "completed", "evidence": ["controller.py"]}])
+    elif role == "judge_review":
+        from alpha_agents.tree_search.tests.judge_fixtures import review_payload
+        return review_payload(request.artifact_id, context["canonical_evidence"]["snapshot_id"], context["rubric"])
     elif role.startswith("judge_"):
         response.update(rubric_version=context["rubric"], findings=["Inspect bounded harness behavior"],
                         coverage={"inspected": ["controller.py"], "unseen": []})
     elif role == "value":
-        response.setdefault("status", "completed")
-        response.update(objective_id=context["objective_id"], discount_factor=context["discount_factor"],
-                        continuation_policy_id=context["continuation_policy_id"],
-                        rationale="Continue under frozen capacity", uncertainty="Deterministic fixture",
-                        evidence=["controller.py"])
+        from alpha_agents.tree_search.tests.value_fixtures import forecast_payload
+        return forecast_payload(context, request.artifact_id, response.get("value", 0))
     return response
 
 
@@ -932,9 +945,7 @@ def test_executable_trial_three_attempts_then_bootstrap_with_real_workspaces(tmp
             self.calls.append(req)
             response = {"artifact_id": req.artifact_id}
             if req.role == "proposer":
-                candidates = [draft(f"plan-{len(self.calls)}-{i}", mechanism=f"recovery {len(self.calls)} mechanism {i}") for i in range(3)]
-                catalog = req.context["plan_archive"]["plan_ids"]
-                response.update(plans=candidates, archive_review={"catalog_plan_ids": catalog, "inspected_plan_ids": catalog, "gaps": []})
+                response.update(plan_format="technical-design-v1", plans=[technical_draft(req.context["proposal_slot"])])
             elif req.role == "policy":
                 response["priors"] = {p["id"]: 1 for p in req.context["plans"]}
             elif req.role == "implementer":
@@ -944,7 +955,7 @@ def test_executable_trial_three_attempts_then_bootstrap_with_real_workspaces(tmp
                 response["status"] = "completed"
             elif req.role == "judge_code":
                 response.update(status="completed", phase="code", findings=["No unsafe paths"])
-            elif req.role == "judge_execution":
+            elif req.role == "judge_review":
                 response.update(status="completed", phase="execution", canonical_evidence_id=req.context["canonical_evidence"]["snapshot_id"],
                                 rubric_version=req.context["rubric"], dimensions={name: {"score": .75, "rationale": "Verified available traces",
                                 "confidence": "medium", "evidence": ["trace"]} for name in ["robustness", "decisions", "generalizable"]})
@@ -968,10 +979,10 @@ def test_executable_trial_three_attempts_then_bootstrap_with_real_workspaces(tmp
     result = executor.run(trial)
     assert len(result["path"]) == 3
     assert s.db.execute("SELECT count(*) FROM attempts").fetchone()[0] == 3
-    assert len([r for r in gateway.calls if r.role == "proposer"]) == 3
+    assert len([r for r in gateway.calls if r.role == "proposer"]) == 9
     assert len([r for r in gateway.calls if r.role == "value"]) == 1
     assert all(r.timeout_seconds == 7200 for r in gateway.calls)
-    assert all(r.collaboration_mode == "plan" for r in gateway.calls if r.role == "proposer")
+    assert all(r.collaboration_mode == "default" and r.execution_mode == "goal" for r in gateway.calls if r.role == "proposer")
     assert len(evaluator.calls) == 6
     assert s.budget()["reserved"] == 0
     assert len(list((s.directory / "attempts").glob("*/model_patch.diff"))) == 3
@@ -1007,7 +1018,7 @@ def engine_factory(tmp_path):
                 self.calls.append(req.role)
                 result = {"artifact_id": req.artifact_id}
                 if req.role == "proposer":
-                    result.update(plans=[draft(f"plan-{i}", mechanism=f"mechanism-{i}") for i in range(3)], archive_review={"catalog_plan_ids": [], "inspected_plan_ids": [], "gaps": []})
+                    result.update(plan_format="technical-design-v1", plans=[technical_draft(req.context["proposal_slot"])])
                 elif req.role == "policy":
                     result["priors"] = {p["id"]: 1 for p in req.context["plans"]}
                 elif req.role == "implementer":
@@ -1017,7 +1028,7 @@ def engine_factory(tmp_path):
                     result["status"] = "completed"
                 elif req.role == "judge_code":
                     result.update(phase="code", status="completed", findings=["bounded recovery"])
-                elif req.role == "judge_execution":
+                elif req.role == "judge_review":
                     if fail_judge:
                         raise TimeoutError("Final review unavailable")
                     result.update(phase="execution", status="completed", canonical_evidence_id=req.context["canonical_evidence"]["snapshot_id"],
@@ -1053,7 +1064,7 @@ def test_executor_estimates_beyond_depth_limit_without_generating_children(engin
         result = invoke(req, workspace)
         if req.role == "value":
             contexts.append(req.context)
-            result["value"] = prediction
+            result = contract_response(req, {"value": prediction})
         return result
 
     gateway.invoke = forecast
@@ -1089,7 +1100,7 @@ def test_depth_eight_frontier_estimates_continuing_value_and_discounts_entire_pa
         result = invoke(req, workspace)
         if req.role == "value":
             contexts.append(req.context)
-            result["value"] = .1
+            result = contract_response(req, {"value": .1})
         return result
 
     gateway.invoke = forecast
@@ -1150,12 +1161,13 @@ def test_depth_eight_frontier_estimates_continuing_value_and_discounts_entire_pa
         store.close()
 
 
-def test_verification_outputs_outside_scope_reject_patch_with_exact_paths(engine_factory):
-    store, executor, gateway, evaluator = engine_factory()
+def test_changes_outside_legacy_scope_are_admitted_and_evaluated(engine_factory):
+    store, executor, gateway, evaluator = engine_factory(max_depth=1)
     invoke = gateway.invoke
     def with_test_outputs(req, workspace):
         result = invoke(req, workspace)
         if req.role == "implementer":
+            assert "allowed_edit_scope" not in req.context
             (workspace / "scratch").mkdir()
             (workspace / "scratch" / "mcp_stderr.log").write_text("test output\n")
             (workspace / "traces").mkdir()
@@ -1164,16 +1176,17 @@ def test_verification_outputs_outside_scope_reject_patch_with_exact_paths(engine
     gateway.invoke = with_test_outputs
     trial = store.reserve_trial()
     result = executor.run(trial)
+    assert len(result["path"]) == 1
     attempt = store.db.execute("SELECT state,child,error FROM attempts").fetchone()
-    assert attempt["state"] == "invalid" and attempt["child"] is None
-    assert attempt["error"] == (
-        "Patch exceeds the frozen intervention edit scope: "
-        "scratch, scratch/mcp_stderr.log, traces, traces/data_engine.db")
-    assert evaluator.calls == []
-    assert "judge_code" not in gateway.calls and "judge_execution" not in gateway.calls
-    assert store.db.execute("SELECT count(*) FROM nodes").fetchone()[0] == 1
-    assert store.db.execute("SELECT count(*) FROM evaluation_snapshots").fetchone()[0] == 0
-    assert result["empty_failed"] and store.status()["backups"] == 1
+    assert attempt["state"] == "eligible" and attempt["child"] is not None
+    assert attempt["error"] is None
+    assert evaluator.calls == ["screen", "s0"]
+    assert "judge_code" not in gateway.calls and gateway.calls.count("judge_review") == 1
+    assert store.db.execute("SELECT count(*) FROM nodes").fetchone()[0] == 2
+    child = store._row("nodes", attempt["child"])
+    paths = {row["path"] for row in executor.artifacts.verify(child["artifact"])}
+    assert {"scratch/mcp_stderr.log", "traces/data_engine.db"} <= paths
+    assert store.status()["backups"] == 1
     store.close()
 
 
@@ -1182,7 +1195,7 @@ def test_strict_screen_failure_never_retries_for_success_or_runs_s0(engine_facto
     trial = store.reserve_trial()
     result = executor.run(trial)
     assert evaluator.calls == ["screen"]
-    assert "judge_execution" not in gateway.calls
+    assert "judge_review" not in gateway.calls
     assert result["empty_failed"]
     assert store.status()["attempts"] == {"invalid": 1}
     assert store.status()["backups"] == 1
@@ -1257,7 +1270,7 @@ def test_pending_judge_recovery_reuses_android_without_regenerating_code(engine_
         executor.run(trial)
     original = gateway.invoke
     def repaired(req, workspace):
-        if req.role != "judge_execution":
+        if req.role != "judge_review":
             return original(req, workspace)
         assert req.context["canonical_evidence"]["reference_contract"]["version"] == "judge-exact-evidence-references-v2"
         assert req.context["canonical_evidence"]["canonical_evidence_id"] == req.context["canonical_evidence"]["snapshot_id"]
@@ -1331,7 +1344,7 @@ def test_final_judge_outage_keeps_android_evidence_and_never_fabricates_j(engine
     with pytest.raises(AssessmentPending):
         executor.run(trial)
     assert evaluator.calls == ["screen", "s0"]
-    assert gateway.calls.count("judge_execution") == 1
+    assert gateway.calls.count("judge_review") == 1
     assert "value" not in gateway.calls
     assert store.status()["trials"] == {"awaiting_judge": 1}
     assert store.db.execute("SELECT count(*) FROM evaluation_snapshots").fetchone()[0] == 2
@@ -1431,35 +1444,37 @@ def test_plan_archive_concurrent_export_and_untrusted_id_are_safe(tmp_path):
 def test_judge_recovery_reuses_absolute_code_evidence_in_a_fresh_workspace(engine_factory):
     from alpha_agents.tree_search.core.mcts.controller import AssessmentPending
 
-    store, executor, gateway, evaluator = engine_factory(fail_judge=True)
+    store, executor, gateway, evaluator = engine_factory()
     original = gateway.invoke
-    def absolute_code_review(request, workspace):
+    def absolute_review(request, workspace):
         response = original(request, workspace)
-        if request.role == "judge_code":
-            response["evidence"] = [str(workspace / "controller.py") + ":1"]
+        if request.role == "judge_review":
+            response["dimensions"]["correctness"]["C01"]["evidence"] = [str(workspace / "controller.py") + ":1"]
+            response["coverage"]["source_inspected"] = [str(workspace / "controller.py") + ":1"]
         return response
-    gateway.invoke = absolute_code_review
+    gateway.invoke = absolute_review
+    readonly = executor._readonly_role
+    def interrupted_publication(owner, purpose, role, artifact, context):
+        result = readonly(owner, purpose, role, artifact, context)
+        if role == "judge_review":
+            raise RuntimeError("Interrupted after persisting the valid review")
+        return result
+    executor._readonly_role = interrupted_publication
     trial = store.reserve_trial()
     with pytest.raises(AssessmentPending):
         executor.run(trial)
     record = next(path for path in (store.directory / "role_requests").glob("*/request.json")
-                  if json.loads(path.read_text())["role"] == "judge_code")
+                  if json.loads(path.read_text())["role"] == "judge_review")
     directory = record.parent
-    assert json.loads((directory / "response.json").read_text())["evidence"] == ["code:controller.py:1"]
-    assert json.loads((directory / "raw_response.json").read_text())["evidence"][0].startswith("/")
-    assert json.loads((directory / "code_evidence_provenance.json").read_text())["artifact_id"] != store.score("root").artifact_id
-    def repaired(request, workspace):
-        if request.role != "judge_execution":
-            return absolute_code_review(request, workspace)
-        assert request.context["code_findings"]["evidence"] == ["code:controller.py:1"]
-        return contract_response(request, {"artifact_id": request.artifact_id, "status": "completed", "phase": "execution",
-            "canonical_evidence_id": request.context["canonical_evidence"]["snapshot_id"],
-            "dimensions": {name: {"score": .75, "rationale": "Verified canonical evidence", "confidence": "medium",
-                "evidence": ["trace"]} for name in ("robustness", "decisions", "generalizable")}})
-    gateway.invoke = repaired
+    response = json.loads((directory / "response.json").read_text())
+    assert response["dimensions"]["correctness"]["C01"]["evidence"] == ["code:controller.py:1"]
+    assert response["coverage"]["source_inspected"] == ["code:controller.py:1"]
+    assert json.loads((directory / "raw_response.json").read_text())["coverage"]["source_inspected"][0].startswith("/")
+    executor._readonly_role = readonly
     executor.stop_admission.clear()
     executor.recover(trial)
-    assert gateway.calls.count("judge_code") == 1
+    assert gateway.calls.count("judge_review") == 1
+    assert "judge_code" not in gateway.calls
     assert gateway.calls.count("implementer") == 1
     assert evaluator.calls == ["screen", "s0"]
     assert store.status()["backups"] == 1
@@ -1467,7 +1482,6 @@ def test_judge_recovery_reuses_absolute_code_evidence_in_a_fresh_workspace(engin
     costs = list(store.db.execute("SELECT * FROM costs WHERE resource='role_execution'"))
     assert len(costs) == store.budget()["spent"]
     assert all(row["classification"] == "observed" and row["seconds"] >= 0 for row in costs)
-    assert all(json.loads(row["metadata"])["usage"]["usage"] is None for row in costs)
     store.close()
 
 
@@ -1543,7 +1557,7 @@ def test_proposer_catalog_keeps_all_plans_and_full_readable_records_without_inli
     assert marker in document.read_text()
     record = json.loads(metadata.read_text())
     assert record["document"] == document.read_text()
-    assert record["novelty"] and record["diversity_audit"] and record["archive_review"]
+    assert record["summary"] and record["plan_format"] == "technical-design-v1"
     assert hashlib.sha256(document.read_bytes()).hexdigest() == entry["document_hash"]
     assert hashlib.sha256(metadata.read_bytes()).hexdigest() == entry["metadata_hash"]
     assert not metadata.stat().st_mode & 0o222
@@ -1555,66 +1569,39 @@ def test_proposer_catalog_keeps_all_plans_and_full_readable_records_without_inli
     store.close()
 
 
-def test_expansion_rechecks_stale_archive_with_reserved_native_plan_retry(engine_factory, monkeypatch):
+def test_expansion_uses_node_local_plans_without_catalog_reads(engine_factory, monkeypatch):
     store, executor, gateway, evaluator = engine_factory()
     store.db.execute("INSERT INTO nodes(id,artifact,parent,depth,score,eligible) "
         "SELECT 'sibling',artifact,'root',1,score,1 FROM nodes WHERE id='root'")
     expand(store, "sibling", [draft("sibling-plan", mechanism="different recovery condition")])
-    catalog = executor._catalog
-    snapshots = []
-    def stale_once():
-        result = catalog()
-        snapshots.append(result)
-        if len(snapshots) == 1:
-            return {**result, "plan_ids": [], "plans": []}
-        return result
-    monkeypatch.setattr(executor, "_catalog", stale_once)
-    invoke = gateway.invoke
-    requests = []
-    def reviewed(request, workspace):
-        requests.append(request)
-        result = invoke(request, workspace)
-        if request.role == "proposer":
-            ids = request.context["plan_archive"]["plan_ids"]
-            result["archive_review"] = {"catalog_plan_ids": ids, "inspected_plan_ids": ids, "gaps": []}
-            result["plans"][0]["closest_plan_ids"] = ids
-            result["plans"][0]["novelty"] = "Compared the updated executable mechanisms: " + repr(ids)
-        return result
-    gateway.invoke = reviewed
-    publish = store.publish_plans
-    publication = []
-    def concurrently_published(node, owner, token, plans, priors, archive, zero_reason=None, **kwargs):
-        if node == "root":
-            publication.append(archive["catalog_plan_ids"])
-        return publish(node, owner, token, plans, priors, archive, zero_reason, **kwargs)
-    monkeypatch.setattr(store, "publish_plans", concurrently_published)
+    def forbidden():
+        raise AssertionError("Expansion must not inspect the full catalog")
+    monkeypatch.setattr(executor, "_catalog", forbidden)
     executor._expand("root", "expansion-worker")
-    assert publication == [[], ["sibling-plan"]]
-    proposer = [request for request in requests if request.role == "proposer"]
-    assert len(proposer) == 2 and all(request.execution_mode == "plan" for request in proposer)
-    assert all(request.timeout_seconds == 7200 for request in requests)
-    assert proposer[1].context["archive_recheck"]["previous_proposal"]["plans"]
-    assert proposer[1].context["plan_archive"]["plan_ids"] == ["sibling-plan"]
+    assert gateway.calls.count("proposer") == 3
+    assert gateway.calls.count("policy") == 1
     assert store.capacity("root")["closed"]
     assert store.db.execute("SELECT count(*) FROM plans WHERE node='root'").fetchone()[0] == 3
-    assert gateway.calls.count("policy") == 2
     assert store.budget()["spent"] == 4 and store.budget()["reserved"] == 0
     assert evaluator.calls == []
     store.close()
 
 
-def test_repeated_catalog_changes_stop_at_reserved_recheck_limit(engine_factory, monkeypatch):
+def test_duplicate_later_proposal_stops_within_reserved_retry_limit(engine_factory):
     from alpha_agents.tree_search.core.mcts.controller import AssessmentPending
-    from alpha_agents.tree_search.core.mcts.storage import CatalogChanged
-
     store, executor, gateway, _ = engine_factory()
-    def changed(*args, **kwargs):
-        raise CatalogChanged("Concurrent archive publication")
-    monkeypatch.setattr(store, "publish_plans", changed)
-    with pytest.raises(AssessmentPending, match="recheck allowance exhausted"):
+    invoke = gateway.invoke
+    def duplicate(request, workspace):
+        response = invoke(request, workspace)
+        if request.role == "proposer":
+            response["plans"] = [technical_draft(1)]
+        return response
+    gateway.invoke = duplicate
+    with pytest.raises(AssessmentPending, match="Proposal slot 2 failed twice"):
         executor._expand("root", "expansion-worker")
-    assert gateway.calls.count("proposer") == gateway.calls.count("policy") == 2
-    assert store.budget()["spent"] == 4 and store.budget()["reserved"] == 0
+    assert gateway.calls.count("proposer") == 3
+    assert gateway.calls.count("policy") == 0
+    assert store.budget()["spent"] == 3 and store.budget()["reserved"] == 0
     assert not store.capacity("root")["closed"]
     assert store.db.execute("SELECT count(*) FROM plans").fetchone()[0] == 0
     store.close()
@@ -1655,7 +1642,7 @@ def test_archive_attempt_evidence_is_complete_readable_and_versioned(engine_fact
         assert {row["stage"] for row in bundle["evaluations"]} == {"screen", "s0"}
         assert bundle["availability"] == dict.fromkeys(
             ["score", "evaluations", "judges", "canonical_s0", "canonical_judge"], "available")
-        assert bundle["judges"][0]["payload"]["dimensions"]["robustness"]["rationale"]
+        assert bundle["judges"][0]["payload"]["dimensions"]["correctness"]["C01"]["rationale"]
         req = RoleRequest(str(store.directory), "archive-inspection", "proposer", store.score("root").artifact_id,
                           "configured-model", "high", {"plan_archive": first})
         profile = role_permissions(req, store.directory / "own-workspace")
@@ -1726,28 +1713,15 @@ def test_catalog_snapshot_write_allows_peer_commit_after_read(engine_factory, mo
         store.close()
 
 
-def test_review_timing_captures_code_overlap_wait_and_cached_score_reuse(engine_factory, monkeypatch):
-    import threading
-
-    from alpha_agents.tree_search.core.mcts.assessment_timing import AssessmentTiming
-
+def test_review_timing_captures_sequential_review_and_cached_score_reuse(engine_factory):
     store, executor, gateway, evaluator = engine_factory()
-    code_started, android_finished = threading.Event(), threading.Event()
-    invoke, evaluate, mark = gateway.invoke, evaluator.evaluate, AssessmentTiming.mark
-    def phased_invoke(request, workspace):
-        if request.role == "judge_code":
-            code_started.set()
-            assert android_finished.wait(5)
+    invoke = gateway.invoke
+    def ordered_review(request, workspace):
+        if request.role == "judge_review":
+            assert evaluator.calls == ["screen", "s0"]
+            assert "code_findings" not in request.context
         return invoke(request, workspace)
-    def phased_evaluate(artifact, workspace, stage, tasks):
-        assert code_started.wait(5)
-        return evaluate(artifact, workspace, stage, tasks)
-    def observed_mark(self, name):
-        mark(self, name)
-        if name == "android_finish":
-            android_finished.set()
-    gateway.invoke, evaluator.evaluate = phased_invoke, phased_evaluate
-    monkeypatch.setattr(AssessmentTiming, "mark", observed_mark)
+    gateway.invoke = ordered_review
     try:
         result = executor.run(store.reserve_trial())
         rows = store.status()["reviewer_timings"]["assessments"]
@@ -1755,11 +1729,13 @@ def test_review_timing_captures_code_overlap_wait_and_cached_score_reuse(engine_
         row = rows[0]
         assert row["state"] == "completed"
         events = row["events"]
-        assert events["code_start"] < events["s0_ready"] <= events["android_finish"] < events["code_finish"]
-        assert events["code_finish"] <= events["execution_start"] <= events["execution_finish"] <= events["score_ready"]
-        assert row["code_android_overlap_seconds"] > 0
-        assert row["code_wait_after_s0_seconds"] > 0
-        assert row["added_continuation_seconds"] >= row["code_wait_after_s0_seconds"] + row["execution_phase_seconds"]
+        assert events["s0_ready"] <= events["android_finish"] <= events["review_start"]
+        assert events["review_start"] <= events["review_finish"] <= events["score_ready"]
+        assert row["code_android_overlap_seconds"] is None
+        assert row["code_phase_seconds"] is None
+        assert row["added_continuation_seconds"] >= row["review_phase_seconds"]
+        assert gateway.calls.count("judge_review") == 1
+        assert "judge_code" not in gateway.calls
         calls = list(gateway.calls)
         child = store._row("nodes", result["path"][0]["child"])
         executor.assess("reuse", child["artifact"])
@@ -1778,7 +1754,7 @@ def test_judge_outage_timing_does_not_claim_continuation_completed(engine_factor
             executor.run(store.reserve_trial())
         row = store.status()["reviewer_timings"]["assessments"][0]
         assert row["state"] == "judge_unavailable"
-        assert row["execution_phase_seconds"] is not None
+        assert row["review_phase_seconds"] is not None
         assert row["added_continuation_seconds"] is None
         assert "score_ready" not in row["events"]
     finally:
@@ -1836,7 +1812,7 @@ def test_value_protocol_describes_implementation_tools_without_granting_them(eng
         protocol = request.context["continuation_role_protocol"]
         assert protocol["model"] == executor.settings.model
         assert protocol["effort"] == executor.settings.effort
-        assert protocol["proposer_mode"] == "native_plan"
+        assert protocol["proposer_mode"] == "native_goal"
         assert protocol["implementer_mode"] == "native_goal"
         verification = protocol["implementation_verification"]
         assert verification["prepared_environment_configured"] is prepared
@@ -1972,7 +1948,7 @@ def test_native_goal_gateway_services_targeted_request_during_engineering(engine
         executor.run(store.reserve_trial())
         engineering = next(request for request in requests if request.role == "implementer")
         assert engineering.execution_mode == "goal" and engineering.timeout_seconds == 7200
-        judge = next(request for request in requests if request.role == "judge_execution")
+        judge = next(request for request in requests if request.role == "judge_review")
         assert "targeted-trace" not in judge.context["canonical_evidence"]["evidence"]
         assert evaluator.calls == ["targeted", "screen", "s0"]
         assert store.db.execute("SELECT count(*) FROM targeted_check_requests WHERE state='completed'").fetchone()[0] == 1
@@ -2149,20 +2125,19 @@ def test_required_three_plan_publication_rejects_incomplete_set_atomically(store
     assert all(plan['remaining'] == 3 for plan in capacity['plans'])
 
 
-@pytest.mark.parametrize('count', [0, 1, 2])
-def test_incomplete_three_plan_proposal_keeps_expansion_open(engine_factory, count):
+@pytest.mark.parametrize('count', [0, 2, 3])
+def test_invalid_single_plan_proposal_keeps_expansion_open(engine_factory, count):
     from alpha_agents.tree_search.core.mcts.controller import AssessmentPending
     store, executor, gateway, evaluator = engine_factory()
     invoke = gateway.invoke
     def incomplete(request, workspace):
         result = invoke(request, workspace)
         if request.role == 'proposer':
-            assert request.context['required_plan_count'] == 3
-            assert request.context['implementation_slots_per_plan'] == 3
-            result['plans'] = result['plans'][:count]
+            assert request.context['required_plan_count'] == 1
+            result['plans'] = [technical_draft(i) for i in range(count)]
         return result
     gateway.invoke = incomplete
-    with pytest.raises(AssessmentPending, match='Proposal failed twice'):
+    with pytest.raises(AssessmentPending, match='Proposal slot 1 failed twice'):
         executor._expand('root', 'worker')
     assert gateway.calls.count('proposer') == 2
     assert 'policy' not in gateway.calls
@@ -2243,7 +2218,9 @@ def test_local_evaluation_recovery_reuses_screen_and_implementation(engine_facto
 @pytest.mark.parametrize('context_kind', ['archive', 'development'])
 def test_policy_attempt_citations_use_explicit_emitted_id_registry(engine_factory, context_kind):
     from alpha_agents.tree_search.core.mcts.responses import validate_response
-    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import role_permissions
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
+        role_permissions,
+    )
 
     store, executor, _, _ = engine_factory()
     try:
@@ -2288,6 +2265,7 @@ def test_value_attempt_registry_is_derived_from_frozen_reachable_capacity(engine
         capacity = store.snapshot_frontier(None, node='root')
         root_score = store.score('root')
         context = {**continuation_context(store, executor.artifacts, capacity),
+                   'score': asdict(root_score),
                    'score_snapshot_id': root_score.identity, 'capacity_snapshot_id': capacity['snapshot_id'],
                    'objective_id': store.objective.identity, 'discount_factor': capacity['discount_factor'],
                    'continuation_policy_id': capacity['continuation_policy_id']}
@@ -2304,12 +2282,77 @@ def test_value_attempt_registry_is_derived_from_frozen_reachable_capacity(engine
         store.close()
 
 
-def test_attempt_registry_in_code_findings_does_not_authorize_judge_citations(tmp_path):
-    from alpha_agents.tree_search.core.mcts.responses import _evidence
+def test_unified_judge_rejects_legacy_code_findings_context(tmp_path):
+    with pytest.raises(ValueError, match='artifact-only'):
+        RoleRequest(str(tmp_path), 'judge', 'judge_review', 'artifact', 'model', 'low',
+            {'canonical_evidence': {'snapshot_id': 'canonical', 'evidence': ['trace']},
+             'code_findings': {'attempt_ids': ['attempt-' + 'a' * 32]}})
 
-    attempt = 'attempt-' + 'a' * 32
-    request = RoleRequest(str(tmp_path), 'judge', 'judge_execution', 'artifact', 'model', 'low',
-        {'canonical_evidence': {'snapshot_id': 'canonical', 'evidence': ['trace']},
-         'code_findings': {'attempt_ids': [attempt]}})
-    with pytest.raises(ValueError, match='out-of-scope'):
-        _evidence([attempt], request, tmp_path / 'workspace')
+
+def test_intervention_accepts_no_file_scope_and_preserves_legacy_metadata():
+    from alpha_agents.tree_search.core.mcts.storage import normalize_intervention
+    intervention = draft("no-allowlist")["intervention"]
+    legacy = normalize_intervention(intervention)
+    assert legacy["scope"] == intervention["scope"]
+    del intervention["scope"]
+    assert "scope" not in normalize_intervention(intervention)
+
+
+@pytest.mark.parametrize("legacy_fields", [(), ("scope",), ("parameters",), ("scope", "parameters")])
+def test_minimal_intervention_and_legacy_fields_preserve_identity(legacy_fields):
+    from alpha_agents.tree_search.core.mcts.storage import normalize_intervention
+    original = draft("minimal-plan")["intervention"]
+    intervention = {key: value for key, value in original.items()
+                    if key not in {"scope", "parameters"} or key in legacy_fields}
+    assert normalize_intervention(intervention) == intervention
+
+
+def test_bad_forecasts_park_trial_and_recovery_reuses_frozen_history(engine_factory):
+    import json
+
+    from alpha_agents.tree_search.core.mcts.controller import AssessmentPending
+    from alpha_agents.tree_search.core.mcts.value_forecast import CONTRACT
+
+    store, executor, gateway, evaluator = engine_factory()
+    invoke = gateway.invoke
+    contexts = []
+    broken = True
+
+    def forecast(request, workspace):
+        result = invoke(request, workspace)
+        if request.role == "value":
+            contexts.append(request.context)
+            if broken:
+                result["scenarios"][0]["probability"] = .5
+        return result
+
+    gateway.invoke = forecast
+    trial = store.reserve_trial()
+    try:
+        with pytest.raises(AssessmentPending, match="Value failed twice"):
+            executor.run(trial)
+        assert store._row("trials", trial)["state"] == "awaiting_value"
+        assert store.db.execute("SELECT count(*) FROM values_assessed").fetchone()[0] == 0
+        assert store.status()["backups"] == 0
+        assert len(contexts) == 2
+        history = contexts[0]["prior_implementations"]
+        assert history["excludes_root"] and len(history["implementations"]) == 1
+        assert history["implementations"][0]["availability"] == "available"
+        assert history["implementations"][0]["artifact_id"] == contexts[0]["score"]["artifact_id"]
+        frozen_id = contexts[0]["capacity_snapshot_id"]
+        broken = False
+        executor.stop_admission.clear()
+        executor.recover(trial)
+        assert contexts[-1]["capacity_snapshot_id"] == frozen_id
+        assert contexts[-1]["prior_implementations"] == history
+        assert contexts[-1]["value_report_contract"] == CONTRACT
+        assert evaluator.calls == ["screen", "s0"]
+        assert gateway.calls.count("implementer") == 1
+        assert store.status()["backups"] == 1
+        row = store.db.execute("SELECT provenance FROM values_assessed").fetchone()
+        persisted = json.loads(row[0])
+        assert persisted["forecast_version"] == "value-v2"
+        assert len(persisted["rubric_assessments"]) == 6
+        assert store.status()["value_calibration"]["assessments"][0]["forecast"] == persisted
+    finally:
+        store.close()

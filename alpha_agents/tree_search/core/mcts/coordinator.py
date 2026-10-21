@@ -18,9 +18,18 @@ from alpha_agents.tree_search.core.mcts.controller import (
     TrialExecutor,
 )
 from alpha_agents.tree_search.core.mcts.finalization import Finalizer
-from alpha_agents.tree_search.core.mcts.ports import RoleGateway, StageEvidence, StagedEvaluator
+from alpha_agents.tree_search.core.mcts.ports import (
+    RoleGateway,
+    StagedEvaluator,
+    StageEvidence,
+)
 from alpha_agents.tree_search.core.mcts.recovery import reconcile_process
 from alpha_agents.tree_search.core.mcts.storage import CapacityError, TreeStore
+from alpha_agents.tree_search.core.mcts.success_stop import (
+    qualifying_success,
+    record_success,
+    stop_receipt,
+)
 from alpha_agents.tree_search.core.shared.storage import write_json
 
 
@@ -99,7 +108,8 @@ class FixedPUCTCoordinator:
                 self._reconcile()
             self._preflight(artifact)
             root = self._initialize_root(artifact, resume)
-            return asdict(self.store.score(root))
+            return {**asdict(self.store.score(root)), "success_stop_qualified": bool(
+                qualifying_success(self.store, root, respect_policy=False))}
 
     def retain_successful_root(self):
         """Verify and export a passing single-task root; never finalize MCTS."""
@@ -113,6 +123,8 @@ class FixedPUCTCoordinator:
             score = self.store.score(root[0])
             if score.u != 1:
                 raise ValueError("Only a passing root can bypass search")
+            if not qualifying_success(self.store, root[0], respect_policy=False):
+                raise ValueError("Passing root requires a usable completed judge without confirmed manipulation")
             if self.store.db.execute("SELECT 1 FROM trials WHERE state!='completed'").fetchone() or self.store.budget()["reserved"]:
                 raise ValueError("Root handoff requires admitted work to drain")
             row = self.store.db.execute("SELECT payload FROM evaluation_snapshots WHERE id=?", (score.u_snapshot_id,)).fetchone()
@@ -178,13 +190,11 @@ class FixedPUCTCoordinator:
             if not resume:
                 raise ValueError("Root initialization exists; use resume")
             if not self.store.db.execute("SELECT 1 FROM judge_snapshots WHERE artifact=?", (artifact,)).fetchone():
-                requirements = {"judge_execution": 1}
-                if not self.store.db.execute("SELECT 1 FROM invocations WHERE owner=? AND purpose='judge_code'", (owner,)).fetchone():
-                    requirements["judge_code"] = 1
+                requirements = {"judge_review": 1}
                 self.store.reserve_recovery(owner, requirements, "Operator resume: root assessment")
         else:
             with self.store.transaction():
-                self.store._reserve(owner, {"judge_code": 1, "judge_execution": 1})
+                self.store._reserve(owner, {"judge_review": 1})
                 self.store.db.execute("INSERT INTO meta VALUES('root_pending',?)", (canonical_json({"artifact_id": artifact}),))
         executor = self._executor(self.store, owner)
         try:
@@ -276,6 +286,12 @@ class FixedPUCTCoordinator:
             self._preflight(artifact)
             self.stop.clear()
             self._initialize_root(artifact, resume)
+            # Rediscover committed success before admitting work, including a
+            # passing root and recovery after score publication but before export.
+            with self.store.transaction():
+                for row in self.store.db.execute("SELECT id FROM nodes WHERE eligible=1 ORDER BY depth,id"):
+                    if record_success(self.store, row[0]):
+                        break
             start_count = self.store.db.execute("SELECT count(*) FROM trials").fetchone()[0]
             pending = [row[0] for row in self.store.db.execute("SELECT id FROM trials WHERE state!='completed' ORDER BY launched")]
             if pending and not resume:
@@ -294,7 +310,8 @@ class FixedPUCTCoordinator:
                     while len(active) < self.config.trial_workers and pending and not self.stop.is_set():
                         trial = pending.pop(0)
                         active[trials.submit(self._trial, trial, True)] = trial
-                    while len(active) < self.config.trial_workers and not pending and not self.stop.is_set():
+                    while (len(active) < self.config.trial_workers and not pending and not self.stop.is_set()
+                           and not stop_receipt(self.store)):
                         launched = self.store.db.execute("SELECT count(*) FROM trials").fetchone()[0]
                         if stop_after_trials is not None and launched - start_count >= stop_after_trials:
                             break
@@ -337,7 +354,8 @@ class FixedPUCTCoordinator:
                 for future in promoting:
                     promotion_results.append(future.result())
             pending_count = self.store.db.execute("SELECT count(*) FROM trials WHERE state!='completed'").fetchone()[0]
-            self._meta("search_state", "recovery_pending" if pending_count else "drained")
+            self._meta("search_state", "recovery_pending" if pending_count else
+                       "qualified_task_success" if stop_receipt(self.store) else "drained")
             result = {"status": self.store.status(), "errors": errors, "promotions": promotion_results,
                       "selection_status": "not_started", "confirmed": False, "confirmation_status": "not_run"}
             if finalize and not pending_count and not self.stop.is_set():

@@ -444,8 +444,12 @@ def test_admitted_check_publishes_pending_receipt_before_device_result(staged_ad
         invocation = store.consume_call("engineering", "implementation")
         req = RoleRequest(str(store.directory), invocation, "implementer", artifact,
                           "configured-model", "high", {"attempt_id": "engineering", "plan_id": "plan"})
+        # A changed artifact is admissible without a plan file allowlist.
+        (workspace / "supporting_test_output.txt").write_text("new candidate file")
+        candidate = adapter.artifacts.freeze(workspace)
+        assert candidate != artifact
         checks = TargetedChecks(store, adapter.artifacts, adapter, workspace, req,
-                               ("TaskA",), lambda parent, child: parent == child)
+                               ("TaskA",))
         payload = {"check_id": "slow-device-check", "attempt_id": "engineering", "tasks": ["TaskA"],
                    "mechanism": "bounded recovery", "expected_observation": "Observed task result"}
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -455,7 +459,7 @@ def test_admitted_check_publishes_pending_receipt_before_device_result(staged_ad
                 pending = json.loads((checks.root / "latest.json").read_text())
                 assert pending["status"] == "pending" and pending["snapshot_id"] is None and pending["outcomes"] is None
                 assert pending["check_id"] == payload["check_id"] and pending["invocation_id"] == req.request_id
-                assert pending["artifact_id"] == artifact and pending["sample_kind"] == "targeted"
+                assert pending["artifact_id"] == candidate and pending["sample_kind"] == "targeted"
                 assert store.db.execute("SELECT count(*) FROM evaluation_snapshots WHERE stage='targeted'").fetchone()[0] == 0
             finally:
                 release.set()
@@ -477,12 +481,13 @@ def test_implementer_targeted_channel_uses_shared_cache_queue_and_actual_handoff
         request = RoleRequest(str(store.directory), invocation, "implementer", artifact, "configured-model", "high",
                               {"attempt_id": "engineering", "plan_id": "frozen-plan"})
         checks = TargetedChecks(store, adapter.artifacts, adapter, workspace, request,
-                               ("ScreenA", "TaskA", "TaskB", "TaskC"), lambda parent, child: parent == child)
+                               ("ScreenA", "TaskA", "TaskB", "TaskC"))
         payload = {"check_id": "recovery", "attempt_id": "engineering", "tasks": ["TaskA"],
                    "mechanism": "bounded recovery", "expected_observation": "Retry once after failed verification"}
         first = checks.handle(payload)
         assert first["status"] == "completed" and first["outcomes"] == {"TaskA": False}
         assert first["sample_kind"] == "targeted" and first["artifact_id"] == artifact
+        assert first["readable_storage"] and all(item["copied_files"] == 0 for item in first["readable_storage"])
         assert first["readable_evidence"] and all(Path(path).is_dir() for path in first["readable_evidence"])
         assert checks.handle(payload) == first
         second = checks.handle({**payload, "check_id": "recovery-replay"})
@@ -854,3 +859,52 @@ def test_dispatch_recovery_preserves_unknown_duration_after_verified_process_dea
         assert metrics["unknown_callback_durations"] == 1
         assert metrics["sessions"][0]["assigned_slot_utilization"] is None
         assert metrics["mean_queue_delay_seconds"] == .2
+
+
+def test_targeted_sqlite_snapshot_handoff_shares_bytes_with_scoped_read_access(staged_adapter):
+    import sqlite3
+    from contextlib import closing
+
+    from alpha_agents.tree_search.core.mcts.targeted_checks import TargetedChecks
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
+        role_permissions,
+    )
+    from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import (
+        RoleRequest,
+    )
+
+    adapter, artifact, workspace, calls, _ = staged_adapter
+    original = adapter.runner
+
+    def runner(workspace, output, *args, **kwargs):
+        with closing(sqlite3.connect(output / 'trace.db')) as database:
+            database.execute('CREATE TABLE records(value)')
+            database.execute('INSERT INTO records VALUES(42)')
+            database.commit()
+        return original(workspace, output, *args, **kwargs)
+
+    adapter.runner = runner
+    with adapter.cache.store() as store:
+        with store.transaction():
+            store._reserve('engineering', {'implementation': 1})
+        invocation = store.consume_call('engineering', 'implementation')
+        request = RoleRequest(str(store.directory), invocation, 'implementer', artifact, 'model', 'low',
+                              {'attempt_id': 'engineering', 'plan_id': 'plan'})
+        checks = TargetedChecks(store, adapter.artifacts, adapter, workspace, request, ('TaskA',))
+        payload = {'check_id': 'inspect', 'attempt_id': 'engineering', 'tasks': ['TaskA'],
+                   'mechanism': 'fixture', 'expected_observation': 'one SQLite record'}
+        result = checks.handle(payload)
+        assert result['status'] == 'completed' and len(result['sqlite_inspection']) == 1
+        snapshot = result['sqlite_inspection'][0]
+        with closing(sqlite3.connect(snapshot['read_uri'], uri=True)) as database:
+            assert database.execute('SELECT value FROM records').fetchall() == [(42,)]
+        canonical = Path(result['evidence'][0])
+        readable = Path(result['readable_evidence'][0])
+        assert (canonical / 'trace.db').stat().st_ino == (readable / 'trace.db').stat().st_ino
+        request.context['device_check_channel'] = checks.channel
+        profile = role_permissions(request, workspace)['filesystem']
+        assert profile[str(checks.root)] == 'read'
+        assert str(checks.root.parent.parent) not in profile
+        assert not list((store.directory / 'targeted_workspaces').iterdir())
+        assert not (canonical.parent / 'workspace').exists()
+        assert checks.handle(payload) == result and len(calls) == 1

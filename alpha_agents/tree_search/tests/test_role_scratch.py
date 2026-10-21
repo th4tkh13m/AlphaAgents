@@ -13,7 +13,7 @@ from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import 
 )
 
 
-@pytest.mark.parametrize("role", ["proposer", "policy", "implementer", "judge_code", "judge_execution", "value"])
+@pytest.mark.parametrize("role", ["proposer", "policy", "implementer", "judge_review", "value"])
 def test_invocation_has_private_scratch_without_other_request_or_evidence_write_access(tmp_path, role):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -40,7 +40,7 @@ def test_scratch_symlink_cannot_turn_an_evidence_directory_into_a_write_grant(tm
     workspace.mkdir()
     evidence = tmp_path / "tasks/task/execution/evidence"
     evidence.mkdir(parents=True)
-    request = RoleRequest(str(tmp_path), "call-first", "judge_execution", "artifact", "gpt-6-luna", "low", {})
+    request = RoleRequest(str(tmp_path), "call-first", "judge_review", "artifact", "gpt-6-luna", "low", {})
     target = request.scratch_directory if location == "scratch" else request.scratch_directory.parent
     target.parent.mkdir(parents=True, exist_ok=True)
     target.symlink_to(evidence, target_is_directory=True)

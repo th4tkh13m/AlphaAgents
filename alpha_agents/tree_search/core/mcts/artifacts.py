@@ -150,6 +150,34 @@ class ArtifactStore:
         if manifest(destination) != records:
             raise ValueError("Materialized artifact does not match its manifest")
 
+    def readonly_view(self, id: str, root: Path | None = None) -> Path:
+        """One independent code copy per artifact, shared only with read roles.
+
+        Never hardlink writable source files to immutable artifacts. Keep the
+        established value_code_views location so permissions and old frozen
+        continuation contexts retain the same exact paths.
+        """
+        root = root if root is not None else self.root.parent / "value_code_views"
+        if root.is_symlink():
+            raise ValueError("Read-only code views cannot use symbolic roots")
+        root.mkdir(parents=True, exist_ok=True)
+        records = self.verify(id)
+        destination = root / id
+        if destination.is_symlink():
+            raise ValueError("Read-only code view cannot be a symbolic link")
+        if not destination.exists():
+            with tempfile.TemporaryDirectory(prefix=".view-", dir=root) as temporary:
+                staging = Path(temporary) / "content"
+                self.materialize(id, staging)
+                try:
+                    os.rename(staging, destination)
+                except OSError:
+                    if not destination.is_dir() or destination.is_symlink():
+                        raise
+        if manifest(destination) != records:
+            raise ValueError("Read-only code view differs from its frozen artifact")
+        return destination
+
     def binary_patch(self, parent: str, child: str) -> bytes:
         """Produce the exact parent-relative Git patch, including new/binary files."""
         self.verify(parent)

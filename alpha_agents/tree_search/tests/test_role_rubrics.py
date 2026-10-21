@@ -9,18 +9,16 @@ from alpha_agents.tree_search.core.mcts.contracts import (
     ARTIFACT_RUBRIC_VERSION,
     CombinedScore,
     Objective,
-    judge_aggregate,
 )
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles import prompts
 
 
 @pytest.mark.parametrize("role,marker", [
-    ("proposer", "Assessment rubric: proposer-v1"),
+    ("proposer", "Required technical design document"),
     ("policy", "Assessment rubric: policy-v1"),
-    ("implementer", "Assessment rubric: implementer-v1"),
-    ("judge_code", "Assessment rubric: code-review-v1"),
-    ("judge_execution", "Assessment rubric: execution-review-v1"),
-    ("value", "Assessment rubric: value-v1"),
+    ("implementer", "Completion criteria"),
+    ("judge_review", "Engineering review workflow"),
+    ("value", "Assessment rubric: value-v2"),
 ])
 def test_each_rendered_role_integrates_its_rubric_and_preserves_supplied_semantics(tmp_path, role, marker):
     context = {"artifact": "artifact", "rubric": ARTIFACT_RUBRIC_VERSION,
@@ -31,11 +29,9 @@ def test_each_rendered_role_integrates_its_rubric_and_preserves_supplied_semanti
     assert marker in rendered
     assert "Static instructions and rubrics are domain-neutral" in rendered
     assert '"case":true' in rendered and '"supplied-record"' in rendered
-    if role.startswith("judge_"):
-        assert ARTIFACT_RUBRIC_VERSION in rendered
-        assert "incoming plan" in rendered and "score=null" in rendered
-        assert "0.5 means" in rendered
-        assert "robustness" in rendered and "decisions" in rendered and "generalizable" in rendered
+    if role == "judge_review":
+        assert "forty" in rendered and "generalizability_integrity" in rendered
+        assert "unknown_reason" in rendered and "confirmed_manipulation" in rendered
     else:
         assert "discounted continuing changes" in rendered
 
@@ -53,28 +49,17 @@ def test_all_instruction_assets_are_free_of_harness_domain_and_trace_layout_assu
     assert "nonempty WAL" in guidance["judge_reference_contract"]["sqlite"]
 
 
-def test_judge_rubric_defines_all_fifteen_dimension_anchors_and_distinguishes_unknown():
-    common = prompts.JUDGE_COMMON
-    rows = re.findall(r"^\| (0|0\.25|0\.5|0\.75|1) \|(.+)$", common, re.M)
-    assert [score for score, _ in rows] == ["0", "0.25", "0.5", "0.75", "1"]
-    for _, cells in rows:
-        descriptions = [cell.strip() for cell in cells.split("|") if cell.strip()]
-        assert len(descriptions) == 3
-        assert all(len(description.split()) >= 10 for description in descriptions)
-    dimensions = {key: {"score": .75, "rationale": "Direct bounded evidence", "confidence": "medium",
-                         "evidence": ["supplied-record"]} for key in ("robustness", "decisions", "generalizable")}
-    dimensions["generalizable"].update(score=None, unknown_reason="No supported variation evidence")
-    aggregate, unknown = judge_aggregate(dimensions)
-    assert aggregate == pytest.approx(2/3)
-    assert unknown == ("generalizable",)
-    assert "not multiplied into the score" in common
+@pytest.mark.parametrize("role", ["judge_code", "judge_execution"])
+def test_removed_judge_roles_cannot_be_dispatched(tmp_path, role):
+    with pytest.raises(ValueError, match="known role"):
+        prompts.RoleRequest(str(tmp_path), "request", role, "artifact", "model", "effort", {})
 
 
 def test_quality_rubric_changes_are_bound_to_prompt_and_objective_identity(tmp_path, monkeypatch):
-    req = prompts.RoleRequest(str(tmp_path), "request", "judge_code", "artifact", "model", "effort", {})
+    req = prompts.RoleRequest(str(tmp_path), "request", "judge_review", "artifact", "model", "effort", {})
     old_library, old_prompt = req.library_hash, req.prompt_hash
     templates = dict(prompts.TEMPLATES)
-    templates["judge_code"] += "\nChanged quality anchor.\n"
+    templates["judge_review"] += "\nChanged quality anchor.\n"
     monkeypatch.setattr(prompts, "TEMPLATES", templates)
     assert req.library_hash != old_library
     assert req.prompt_hash != old_prompt
@@ -93,5 +78,23 @@ def test_adapter_evidence_can_carry_domain_semantics_without_static_prompt_assum
         assert semantics in req.render()
         assert semantics not in prompts.PROPOSER
         assert req.to_record()["context"]["supplied_semantics"] == semantics
-    assert "Assessment rubric: plan-repair-v1" in prompts.PLAN_REPAIR_TEMPLATE
-    assert set(prompts.TEMPLATES) == {"proposer", "policy", "implementer", "judge_code", "judge_execution", "value"}
+    assert "Technical design document requirements" in prompts.PLAN_REPAIR_TEMPLATE
+    assert set(prompts.TEMPLATES) == {"proposer", "policy", "implementer", "judge_review", "value"}
+
+
+def test_structured_value_forecast_is_complete_and_active(tmp_path, monkeypatch):
+    text = prompts.VALUE_FORECAST
+    assert re.findall(r"^## (\d+)\.", text, re.M) == [str(i) for i in range(1, 11)]
+    assert re.findall(r"^### (V\d{2}) —", text, re.M) == [f"V{i:02}" for i in range(1, 7)]
+    for requirement in ("observed", "source_supported", "speculative", "scenario_return",
+                        "weighted_contribution", "continued_search", "gamma^n * V_tail",
+                        "alternative_value", "curated implementation summaries", "null otherwise"):
+        assert requirement in text
+    request = prompts.RoleRequest(str(tmp_path), "value", "value", "artifact", "model", "low", {})
+    assert "Assessment rubric: value-v2" in request.render()
+    assert "Assessment rubric: value-v1" not in request.render()
+    old_library = request.library_hash
+    templates = dict(prompts.TEMPLATES)
+    templates["value"] = text + "\nChanged forecast contract.\n"
+    monkeypatch.setattr(prompts, "TEMPLATES", templates)
+    assert request.library_hash != old_library

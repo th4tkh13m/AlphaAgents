@@ -1,0 +1,83 @@
+{
+  "controller": {
+    "type": "task_sequence",
+    "screen_gate": "execution_valid",
+    "discount_factor": 0.9,
+    "max_trials": 30,
+    "trial_workers": 4,
+    "implementor_limit": 4,
+    "codex_invocation_cap": 2000,
+    "shortlist_limit": 3,
+    "max_depth": 4,
+    "max_new_attempts_per_trial": 4,
+    "max_attempts": 120,
+    "device_limit": 4,
+    "max_plans": 3,
+    "max_implementations": 2,
+    "stop_on_task_success": true
+  },
+  "harness": {
+    "type": "androidworld",
+    "source": "../../../harness/artemis",
+    "config": {
+      "python": "/path/to/gui-dependencies/bin/python",
+      "agent_venv": "/path/to/gui-dependencies",
+      "androidworld_root": "../../../eval/android_world",
+      "adb_path": "/path/to/android-sdk/platform-tools/adb",
+      "base_url": "http://localhost:8001/v1",
+      "model": "Qwen/Qwen3.8-27B-FP8",
+      "seed": 42,
+      "llm_timeout": 300,
+      "androidworld_devices": [
+        "emulator-5580",
+        "emulator-5582",
+        "emulator-5584",
+        "emulator-5586"
+      ],
+      "androidworld_device_ports": {
+        "emulator-5580": {
+          "console_port": 5580,
+          "grpc_port": 8580
+        },
+        "emulator-5582": {
+          "console_port": 5582,
+          "grpc_port": 8582
+        },
+        "emulator-5584": {
+          "console_port": 5584,
+          "grpc_port": 8584
+        },
+        "emulator-5586": {
+          "console_port": 5586,
+          "grpc_port": 8586
+        }
+      }
+    }
+  },
+  "codex": {
+    "model": "gpt-6.1-sol",
+    "effort": "low",
+    "runtime": {
+      "python": "/path/to/codex-sdk/bin/python",
+      "codex_bin": "/path/to/codex",
+      "provider": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "auth_mode": "environment",
+      "api_key_env": "OPENAI_API_KEY"
+    }
+  },
+  "evaluation": {
+    "manifest": "../../../androidworld_sets_manifest.json",
+    "model_revision": null,
+    "androidworld_revision": "replace-with-the-full-40-or-64-character-androidworld-git-commit-sha",
+    "fixture_identity": "record-the-frozen-emulator-image-and-fixture-identity",
+    "judge_weight": 0.1
+  },
+  "sequence": {
+    "task_scope": "all_development",
+    "expected_task_count": 25,
+    "order": "difficulty_then_human_steps",
+    "reuse_cached_root_results": false,
+    "skip_successful_roots": true
+  }
+}

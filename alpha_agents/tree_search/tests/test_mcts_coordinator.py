@@ -26,7 +26,7 @@ from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import 
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.telemetry import (
     role_usage,
 )
-from alpha_agents.tree_search.tests.test_mcts import contract_response, draft
+from alpha_agents.tree_search.tests.test_mcts import contract_response, technical_draft
 
 
 class Gateway(RoleAdapter):
@@ -40,9 +40,8 @@ class Gateway(RoleAdapter):
             self.calls.append(req)
         result = {"artifact_id": req.artifact_id}
         if req.role == "proposer":
-            catalog = req.context["plan_archive"]["plan_ids"]
-            result.update(plans=[draft(f"candidate-{i}", mechanism=f"recovery mechanism {i} for {req.artifact_id}") for i in range(3)],
-                          archive_review={"catalog_plan_ids": catalog, "inspected_plan_ids": catalog, "gaps": []})
+            result.update(plan_format="technical-design-v1",
+                          plans=[technical_draft(req.context["proposal_slot"])])
         elif req.role == "policy":
             result["priors"] = {plan["id"]: 1 for plan in req.context["plans"]}
         elif req.role == "implementer":
@@ -56,7 +55,7 @@ class Gateway(RoleAdapter):
             result["status"] = "completed"
         elif req.role == "judge_code":
             result.update(status="completed", phase="code")
-        elif req.role == "judge_execution":
+        elif req.role == "judge_review":
             result.update(status="completed", phase="execution",
                           canonical_evidence_id=req.context["canonical_evidence"]["snapshot_id"],
                           dimensions={key: {"score": .75, "rationale": "Inspected bounded behavior",
@@ -191,7 +190,7 @@ def test_two_workers_initialize_real_root_then_drain_exact_stop_count(coordinato
     proposals = [request for request in coordinator.gateway.calls if request.role == "proposer"]
     assert proposals
     for request in proposals:
-        assert request.context["verification_scope_contract"]["version"] == "test-edit-scope-v1"
+        assert request.context["verification_scope_contract"]["version"] == "candidate-harness-edits-v2"
         recorded = json.loads((coordinator.directory / "role_requests" / request.request_id / "request.json").read_text())
         assert recorded["context"]["verification_scope_contract"] == request.context["verification_scope_contract"]
         assert recorded["prompt_hash"] == request.prompt_hash
@@ -286,7 +285,7 @@ def test_root_assessment_crash_before_node_commit_reuses_completed_roles(coordin
     evaluations = len(coordinator.evaluator.calls)
     monkeypatch.setattr(coordinator.store, "add_root", add)
     coordinator.run(resume=True, stop_after_trials=0)
-    assert len(coordinator.gateway.calls) == calls == 2
+    assert len(coordinator.gateway.calls) == calls == 1
     assert len(coordinator.evaluator.calls) == evaluations == 2
     assert coordinator.store.status()["codex_invocations"]["reserved"] == 0
 
@@ -371,14 +370,19 @@ def test_wrong_birth_time_does_not_terminate_an_unrelated_reused_pid(tmp_path):
 
 def test_operator_stop_drains_admitted_attempts_without_new_promotions_or_finalization(coordinator):
     invoke = coordinator.gateway.invoke
+    admitted = threading.Barrier(coordinator.config.trial_workers)
     def stopped(req, workspace):
         result = invoke(req, workspace)
         if req.role == "implementer":
+            # Both workers may already own bounded work when stop is requested.
+            # Make that state deterministic instead of assuming one wins a race.
+            admitted.wait(timeout=10)
             coordinator.request_stop()
         return result
     coordinator.gateway.invoke = stopped
     result = coordinator.run()
-    assert coordinator.gateway.implementations == 1
+    assert coordinator.gateway.implementations == coordinator.config.trial_workers
+    assert coordinator.store.db.execute("SELECT count(*) FROM attempts").fetchone()[0] == coordinator.config.trial_workers
     assert result["selection_status"] == "not_started"
     assert coordinator.store.budget()["reserved"] == 0
     assert coordinator.store.db.execute("SELECT count(*) FROM promotions").fetchone()[0] == 0
@@ -526,26 +530,16 @@ def test_final_report_exposes_per_node_task_weights_and_judge_components(coordin
             assert node["parent_reward"]["total"] == pytest.approx(
                 node["parent_reward"]["weighted_android"] + node["parent_reward"]["weighted_judge"])
     markdown = (coordinator.directory / "FINAL_REPORT.md").read_text()
-    assert "Weighted contribution" in markdown and "Effective rating" in markdown
+    assert "Weighted contribution" in markdown and "Normalized rating" in markdown
     assert "Predicted continuation contributions remain separate" in markdown
 
 
 @pytest.mark.parametrize("worker_count", [2, 9])
 def test_full_30_trial_software_protocol_with_three_concurrent_plan_branches(tmp_path, worker_count):
-    class DiverseGateway(Gateway):
-        def invoke(self, request, workspace):
-            result = super().invoke(request, workspace)
-            if request.role == "proposer":
-                result["plans"] = [draft("candidate-" + name, mechanism=mechanism) for name, mechanism in (
-                    ("observe", "verify observations before acting"),
-                    ("recover", "bounded recovery after failed verification"),
-                    ("memory", "invalidate stale context after state changes"))]
-                result = contract_response(request, result)
-            return result
     source = tmp_path / "source"
     source.mkdir()
     (source / "controller.py").write_text("value = 0\n")
-    gateway, evaluator = DiverseGateway(), Evaluator()
+    gateway, evaluator = Gateway(), Evaluator()
     tasks = tuple(f"Task{i:02}" for i in range(20))
     s0 = tasks[:10]
     subset = {"tasks": [{"task": task, "weight": {"display": .1}} for task in s0], "coverage": {"fixture": "software-only"}}
@@ -565,7 +559,7 @@ def test_full_30_trial_software_protocol_with_three_concurrent_plan_branches(tmp
         assert search.store.db.execute("SELECT max(count) FROM (SELECT count(*) AS count FROM attempts GROUP BY plan)").fetchone()[0] <= 3
         assert search.store.budget()["reserved"] == 0
         assert all(request.execution_mode == "goal" for request in gateway.calls if request.role == "implementer")
-        assert all(request.execution_mode == "plan" for request in gateway.calls if request.role == "proposer")
+        assert all(request.execution_mode == "goal" for request in gateway.calls if request.role == "proposer")
         winner = result["final_selection"]["winner"]["artifact_id"]
         assert manifest(search.directory / "winner") == search.artifacts.verify(winner)
         assert all(stage != "confirmation" for _, stage, _ in evaluator.calls)
@@ -733,7 +727,7 @@ def test_parked_trial_allows_peer_depth_and_replacement_admission(tmp_path, monk
 
     class OutageGateway(Gateway):
         def invoke(self, req, workspace):
-            if req.role == "judge_execution" and req.artifact_id in bad_artifact and outage == "judge":
+            if req.role == "judge_review" and req.artifact_id in bad_artifact and outage == "judge":
                 raise TimeoutError("Judge unavailable")
             result = super().invoke(req, workspace)
             if req.role == "implementer" and self.implementations >= 3:
@@ -807,7 +801,7 @@ def test_node_operation_outage_cuts_off_only_affected_rollout(tmp_path, monkeypa
     class OutageGateway(Gateway):
         failures = 0
         def invoke(self, req, workspace):
-            if (req.role == role and req.context.get("capacity", {}).get("depth") == 1
+            if (req.role == role and req.context.get("node_depth", req.context.get("capacity", {}).get("depth")) == 1
                     and req.context["score"]["u"] == .5):
                 self.failures += 1
                 raise TimeoutError("Node operation unavailable")

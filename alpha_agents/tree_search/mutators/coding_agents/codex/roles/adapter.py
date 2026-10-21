@@ -1,8 +1,8 @@
-"""Native Plan/Goal worker, isolated under one outer invocation deadline.
+"""Persisted Goal worker, isolated under one outer invocation deadline.
 
-Uses the pinned SDK's raw app-server parameter passthrough for experimental
-Plan mode and its logical persisted-goal collection for /goal. No model or
-reasoning defaults and no ordinary-turn fallback are provided.
+Proposer and implementer use logical persisted-goal collection. Historical
+Plan helpers remain for compatibility tests, outside current runtime dispatch.
+No model/reasoning defaults or ordinary-turn fallback are provided.
 """
 
 from __future__ import annotations
@@ -26,8 +26,9 @@ from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions imp
     validate_effective_permissions,
 )
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.prompts import (
-    GOAL_OBJECTIVE_TEMPLATE,
+    IMPLEMENTER_GOAL_OBJECTIVE_TEMPLATE,
     PLAN_REPAIR_TEMPLATE,
+    PROPOSER_GOAL_OBJECTIVE_TEMPLATE,
     RoleRequest,
 )
 from alpha_agents.tree_search.mutators.coding_agents.codex.roles.responses import (
@@ -58,10 +59,19 @@ class InvocationDeadline:
 def goal_objective(request: RoleRequest, context_path: Path) -> str:
     """A developed completion contract; the complete detailed prompt stays intact."""
     if request.execution_mode != "goal":
-        raise ValueError("Only the implementation engineer receives a native goal")
-    objective = GOAL_OBJECTIVE_TEMPLATE.format(
-        plan_id=request.context["plan_id"], attempt_id=request.context["attempt_id"],
-        artifact_id=request.artifact_id, context_path=context_path)
+        raise ValueError("Native goal objective requires a Goal-mode role")
+    if request.role == "proposer":
+        objective = PROPOSER_GOAL_OBJECTIVE_TEMPLATE.format(
+            request_id=request.request_id, artifact_id=request.artifact_id, context_path=context_path)
+    elif request.role == "implementer":
+        objective = IMPLEMENTER_GOAL_OBJECTIVE_TEMPLATE.format(
+            plan_id=request.context["plan_id"], attempt_id=request.context["attempt_id"],
+            artifact_id=request.artifact_id, context_path=context_path)
+    else:
+        raise ValueError("Native Goal belongs only to proposer or implementer")
+    # The app-server canonicalizes surrounding whitespace on stored objectives.
+    # Use that exact canonical form for creation, continuation, and identity checks.
+    objective = objective.strip()
     if len(objective) > 4000:
         raise ValueError("Goal identity/path exceeds native objective field limit; full prompt was not truncated")
     return objective
@@ -165,6 +175,45 @@ def _collect_plan(client, request, workspace, output, deadline=None):
     raise AssertionError("Native plan repair loop failed to settle")
 
 
+def _collect_proposal_goal_handoff(request, workspace, output, deadline, result, goal,
+                                   objective, thread_id, resume):
+    """Validate/repair a design in one persisted Goal, without new objectives."""
+    for attempt in range(3):
+        deadline.require_remaining()
+        if (goal is None or getattr(goal, "objective", None) != objective
+                or getattr(goal, "thread_id", None) != thread_id):
+            raise RuntimeError("Proposer Goal changed its stored objective or thread")
+        if jsonable(goal.status) != "complete" or jsonable(result.status) != "completed":
+            raise RuntimeError("Proposer Goal must complete before its document can be admitted")
+        document = result.final_response or ""
+        (output / "proposed_design.md").write_text(document)
+        (output / f"proposed_design_attempt_{attempt}.md").write_text(document)
+        record = {"thread_id": thread_id, "turn_id": result.id,
+                  "execution_mode": "goal", "goal": jsonable(goal),
+                  "items": jsonable(result.items), "usage": jsonable(result.usage)}
+        write_json(output / f"proposal_goal_result_{attempt}.json", record)
+        write_json(output / "native_result.json", record)
+        write_json(output / "goal_state.json", jsonable(goal))
+        try:
+            response = parse_native_plan(document, request)
+            validate_response(response, request, workspace)
+        except ValueError as error:
+            feedback = {"validation_error": str(error), "failed_attempt": attempt,
+                        "request_id": request.request_id, "artifact_id": request.artifact_id,
+                        "remaining_seconds": deadline.remaining()}
+            write_json(output / f"plan_validation_failure_{attempt}.json", feedback)
+            if attempt == 2:
+                raise
+            deadline.require_remaining()
+            instruction = PLAN_REPAIR_TEMPLATE.replace("[[VALIDATION_ERROR_JSON]]", json.dumps(feedback, indent=2))
+            instruction = instruction.replace("[[ORIGINAL_REQUEST]]", request.render())
+            (output / f"plan_repair_prompt_{attempt}.md").write_text(instruction)
+            result, goal = resume(instruction)
+            continue
+        return response
+    raise AssertionError("Proposer Goal repair loop failed to settle")
+
+
 def _collect_goal(client, request, workspace, output, deadline, restart=None):
     from openai_codex.api import Thread
 
@@ -254,6 +303,27 @@ def _collect_goal(client, request, workspace, output, deadline, restart=None):
     if (goal is None or getattr(goal, "objective", None) != objective
             or getattr(goal, "thread_id", None) != thread_id):
         raise RuntimeError("Final native Goal no longer matches the invocation's stored objective and thread")
+    if request.role == "proposer":
+        def resume_design(instruction):
+            deadline.require_remaining()
+            stored = _goal_snapshot(client, thread_id)
+            if (stored is None or getattr(stored, "objective", None) != objective
+                    or getattr(stored, "thread_id", None) != thread_id
+                    or jsonable(stored.status) != "complete"):
+                raise RuntimeError("Proposer repair changed the stored Goal identity or lifecycle")
+            context_path.write_text(instruction)
+            _require_idle_thread(client, thread_id, min(10, deadline.remaining()))
+            repaired, incident, repaired_goal = run_watched_goal(Thread(client, thread_id), None, resume=True)
+            deadline.require_remaining()
+            if incident is not None:
+                raise RuntimeError("Native Goal launcher failed during proposer repair")
+            return repaired, repaired_goal
+        response = _collect_proposal_goal_handoff(request, workspace, output, deadline, result, goal,
+                                                  objective, thread_id, resume_design)
+        record = json.loads((output / "native_result.json").read_text())
+        record["physical_turns"] = jsonable(client.thread_read(thread_id, include_turns=True).thread.turns)
+        write_json(output / "native_result.json", record)
+        return response
     response = parse_json_response(result.final_response or "")
     if jsonable(goal.status) != "complete" or jsonable(result.status) != "completed":
         if response.get("status") == "completed":
@@ -304,7 +374,7 @@ def run_native(request: RoleRequest, runtime: CodexRuntime, workspace: Path, out
     deadline = InvocationDeadline(request.timeout_seconds)
     output.mkdir(parents=True, exist_ok=True)
     if request.role not in {"proposer", "implementer"}:
-        raise ValueError("Native worker is reserved for Plan/Goal roles")
+        raise ValueError("Native worker is reserved for proposer and implementer Goals")
     from alpha_agents.tree_search.mutators.coding_agents.codex.roles.permissions import (
         runtime_permissions,
     )
@@ -356,8 +426,9 @@ def run_native(request: RoleRequest, runtime: CodexRuntime, workspace: Path, out
                                          "remaining_seconds": deadline.remaining()}) + "\n")
             deadline.require_remaining()
             return replacement
-        result = (_collect_plan(client, request, workspace, output, deadline) if request.execution_mode == "plan"
-                  else _collect_goal(client, request, workspace, output, deadline, restart))
+        if request.execution_mode != "goal":
+            raise ValueError("Proposer and implementer must use native Goal execution")
+        result = _collect_goal(client, request, workspace, output, deadline, restart)
         if expired.is_set():
             raise TimeoutError("Original two-hour native invocation deadline reached")
         validate_response(result, request, workspace)
@@ -408,7 +479,6 @@ def main(argv=None):
         try:
             client.start()
             initialize = client.initialize()
-            _assert_plan_preset(client)
             from openai_codex.generated.v2_all import ConfigReadResponse
             configuration = jsonable(client.request("config/read", {
                 "includeLayers": True, "cwd": str(args.workspace.resolve())}, response_model=ConfigReadResponse))
@@ -424,7 +494,7 @@ def main(argv=None):
                 raise RuntimeError("SDK lacks native persisted Goal lifecycle support")
             _probe_thread_sandbox(client, args.workspace.resolve())
             write_json(args.output / "preflight.json", {
-                "runtime": jsonable(initialize), "native_plan_preset": True, "native_goal_sdk": True, "legacy_sandbox_layers": False, "role_permission_profile_loaded": True,
+                "runtime": jsonable(initialize), "proposer_mode": "native_goal", "native_goal_sdk": True, "legacy_sandbox_layers": False, "role_permission_profile_loaded": True,
                 "ephemeral_thread_sandbox_initialized": True, "model_turns_started": 0})
         finally:
             client.close()

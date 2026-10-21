@@ -104,6 +104,31 @@ def test_resource_counters_are_distinct_per_device(recorded):
     assert len({e["name"] for e in counters}) == 4
 
 
+def test_unified_review_exports_active_and_completed_assessments(recorded):
+    events = json.dumps({"android_start": 1, "android_finish": 5, "review_start": 6})
+    recorded.db.execute(
+        "INSERT INTO assessment_timings VALUES('review','baseline','artifact','running',100,NULL,?)",
+        (events,),
+    )
+    before = list(recorded.db.iterdump())
+    trace = snapshot(recorded.directory, 120, [], fallback_start=100)
+    assert list(recorded.db.iterdump()) == before
+    review = next(e for e in trace["traceEvents"]
+                  if e.get("cat") == "assessment" and e["name"] == "Engineering review [ongoing]")
+    assert review["dur"] == 14_000_000 and review["args"]["incomplete"]
+    android = next(e for e in trace["traceEvents"] if e["name"] == "Android evaluation/cache"
+                   and e["ph"] == "X")
+    assert review["tid"] != android["tid"]
+    recorded.db.execute(
+        "UPDATE assessment_timings SET state='completed',finished=119,events=? WHERE id='review'",
+        (json.dumps({"review_start": 6, "review_finish": 18}),),
+    )
+    trace = snapshot(recorded.directory, 120, [], fallback_start=100)
+    review = next(e for e in trace["traceEvents"]
+                  if e.get("cat") == "assessment" and e["name"] == "Engineering review")
+    assert review["dur"] == 12_000_000 and not review["args"]["incomplete"]
+
+
 def test_watcher_rejects_duplicate_ownership_and_flushes_before_state_close(recorded):
     first = threading.Event()
     watcher = TraceWatcher(recorded.directory, interval=1)

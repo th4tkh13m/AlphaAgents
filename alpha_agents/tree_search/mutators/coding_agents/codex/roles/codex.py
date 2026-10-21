@@ -1,4 +1,4 @@
-"""Process-isolated Codex gateway with native Plan and persisted Goal execution."""
+"""Process-isolated Codex gateway with persisted Goal execution for coding roles."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ class CodexGateway(RoleAdapter):
         if role == "value":
             context["continuation_role_protocol"] = {
                 **context["continuation_role_protocol"],
-                "proposer_mode": "native_plan", "implementer_mode": "native_goal",
+                "proposer_mode": "native_goal", "implementer_mode": "native_goal",
                 "implementation_verification": {"prepared_environment_configured": bool(tools), **tools},
             }
         return context
@@ -149,8 +149,8 @@ class CodexGateway(RoleAdapter):
             subprocess.run([self.runtime.codex_bin, "app-server", "generate-json-schema", "--experimental", "--out", tmp],
                            capture_output=True, text=True, timeout=30, check=True)
             files = list(Path(tmp).rglob("TurnStartParams.json"))
-            if len(files) != 1 or "collaborationMode" not in json.loads(files[0].read_text()).get("properties", {}):
-                raise RuntimeError("Configured Codex runtime lacks native Plan-mode turn support")
+            if len(files) != 1:
+                raise RuntimeError("Configured Codex runtime lacks the turn-start schema")
             thread_files = list(Path(tmp).rglob("ThreadStartParams.json"))
             if not thread_files or "permissions" not in json.loads(thread_files[0].read_text()).get("properties", {}):
                 raise RuntimeError("Configured Codex runtime lacks named thread permission profiles")
@@ -173,7 +173,7 @@ class CodexGateway(RoleAdapter):
                 errors = (Path(tmp) / "preflight-process" / "stderr.txt").read_text()
                 raise RuntimeError(f"Native Codex capability preflight failed: {errors[-2000:]}")
             capabilities = json.loads((Path(tmp) / "preflight.json").read_text())
-        return {"runtime": self.runtime.record, "version": version, "native_plan": True, "native_goal": True,
+        return {"runtime": self.runtime.record, "version": version, "proposer_mode": "native_goal", "native_goal": True,
                 "capabilities": capabilities}
 
     def invoke(self, request: RoleRequest, workspace: Path) -> dict:

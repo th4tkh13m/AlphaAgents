@@ -319,7 +319,15 @@ class StagedArtemisEvaluator(EvaluationAdapter):
             raise UnhealthyDevice(error)
         if error:
             raise TaskIncomplete(error)
-        return self.cache.cached(identity)
+        result = self.cache.cached(identity)
+        from alpha_agents.tree_search.core.mcts.recovery import reconcile_process
+        from alpha_agents.tree_search.core.mcts.resource_retention import (
+            retire_workspace,
+        )
+        if reconcile_process(output / "runner/process.json", terminate=False):
+            retire_workspace(self.cache.directory, workspace, self.artifacts, identity.artifact_id,
+                             directory / "workspace_retention.json")
+        return result
 
     def recover_completed(self, row):
         """Recover a completed trusted task interrupted before its DB commit.

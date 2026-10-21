@@ -1,748 +1,700 @@
-> **Idea:** Replace one-shot patch generation with an explicit search over **improvement hypotheses**: structured hypotheses about **what the coding agent should change, why that change should help, and what observable effect it should produce**. A PUCT-style controller allocates experiments among these hypotheses and backpropagates empirical improvement evidence.
-> 
+## 1. Purpose and design status
 
-## Core formulation
+AlphaAgents searches for improved mobile-GUI agent harnesses through repeated diagnosis, plan generation, implementation, and evaluation. The harness includes executable code, prompts, configuration, and other assets that determine behavior. The underlying GUI-agent model and benchmark execution conditions must be recorded so improvements can be attributed to the harness.
 
-Current harness optimization often behaves as:
+The system preserves exact generated artifacts and searches a persistent tree of modifications. It uses measured utility changes as rewards and Codex predictions of future utility change to bootstrap frontier returns. A PUCT controller combines these backed-up returns with Codex-generated plan priors.
 
-```
-parent harness → coding agent → patch → evaluate → keep/discard
-```
+This note consolidates the current design for engineering implementation and research review. **Agreed choices** are distinguished from **proposed implementation details** and **open decisions**. It is a design specification, not a claim of demonstrated performance.
 
-The proposed process is:
+Source discussion: Implementation Idea.
 
-```
-parent harness + failure evidence
-        ↓
-generate candidate improvement hypotheses
-        ↓
-PUCT selects what to try
-        ↓
-coding agent implements selected hypothesis
-        ↓
-exact child harness
-        ↓
-screen + benchmark evaluation
-        ↓
-update beliefs and search values
-        ↓
-backpropagate along selected path
-        ↓
-choose next expansion
-```
+### Agreed initial configuration
 
-The central principle is:
-
-> **Search over explicit hypotheses about what the coding agent should do, rather than directly sampling arbitrary patches.**
-> 
-
-## What is an improvement hypothesis?
-
-An MCTS action is an **improvement / patch-action hypothesis**:
-
-$$
-a=(F,C,M,O)
-$$
-
-where:
-
-- $F$: **target failure/problem**,
-- $C$: **causal explanation** for the failure,
-- $M$: **proposed modification**,
-- $O$: **predicted observable outcome** if the hypothesis is correct and the modification is implemented properly.
-
-Example:
-
-> **Failure:** the agent repeatedly taps without progress.
-> 
-
-> **Cause:** repetition is detected, but the harness has no escalation mechanism.
-> 
-
-> **Modification:** after repeated equivalent unsuccessful actions, mark the attempt failed and invoke replanning with failure context.
-> 
-
-> **Expected outcome:** repeated-action loops terminate and the planner chooses a different strategy.
-> 
-
-This object is both **scientifically interpretable** and **directly executable**.
-
-It is important to distinguish:
-
-$$
-\text{improvement hypothesis}
-\neq
-\text{generated patch}
-\neq
-\text{observed effect}
-$$
-
-The hypothesis specifies what should be changed and why. The coding agent instantiates it as code. Evaluation then determines what actually happened.
-
-## AlphaGo analogy
-
-| AlphaGo | AlphaAgents |
+| Item | Initial choice |
 | --- | --- |
-| State $s$ | Harness + failures + accumulated evidence |
-| Legal/candidate move $a$ | Improvement hypothesis: what the coding agent should change and why |
-| Policy prior $P(a\mid s)$ | LLM prior over promising improvement hypotheses |
-| Execute move | Coding agent implements the selected hypothesis |
-| Next state $s'$ | Exact modified child harness + new observations |
-| Value / rollout | Screening, diagnostic probes, and benchmark evaluation |
-| $Q(s,a)$ | Empirical value of pursuing that improvement direction |
-| MCTS backup | Propagate downstream improvement evidence along the explored lineage |
+| Artifact state | Exact harness |
+| Modification action | Frozen `PLAN.md` contents |
+| Implementation | Stochastic Codex transition |
+| Plan proposal and priors | Codex action proposer and policy estimator |
+| Selection in the initial controller | PUCT |
+| Reward | Child frozen combined utility F minus parent F |
+| Discount factor | Configurable and run-frozen; 0.9 proposed starting point |
+| Value estimate | Codex scalar prediction of future net utility change |
+| Search modification depth limit | D=8 from a fixed local root |
+| Value target | Expected discounted continuing improvement under the declared policy; no remaining-budget input |
+| Per-trial computation | Up to three new implementation attempts |
+| Intermediate evaluation | Full Screen, targeted checks, and a fixed half of Selection S0 (proposed evaluation configuration) |
+| More expensive evaluation | Full Selection for promising or uncertain candidates |
+| Confirmation | Shortlisted promotion or final-output candidates |
+| Final output | An existing evaluated harness, including any intermediate candidate |
 
-The key AlphaGo-like property is:
+**Configured first controller:** fixed branching with up to three distinct plans per expanded harness and up to three implementation attempts per plan, generated incrementally. Use 30 trials, each with up to three new attempts. Compare one or two implementations per plan, double progressive widening, and adaptive branching as alternatives under matched total cost. Section 8 specifies the proposed half-Selection evaluation and six-device scheduler.
 
-$$
-\text{initial plausibility} \neq \text{empirical search value}
-$$
+## 2. Goal, utility, and the controller's surrogate objective
 
-A low-prior improvement hypothesis can become preferred if its descendants repeatedly produce useful improvements.
-
-## Search state
-
-Let each search node be
-
-$$
-n_i=(H_i,F_i,E_i,\mathcal{B}_i,R_i)
-$$
-
-where:
-
-- $H_i$: exact harness version,
-- $F_i$: unresolved failures / target behaviors,
-- $E_i$: trajectories, probes, diffs, task outcomes, regressions, and other accumulated evidence,
-- $\mathcal{B}_i$: explicit beliefs about relevant causal claims,
-- $R_i$: evaluation records, costs, and search statistics.
-
-The node is therefore an **epistemic state**, not merely a code snapshot.
-
-Each node should preserve:
-
-- improvement hypotheses already considered,
-- evidence supporting or contradicting their causal claims,
-- concrete implementations already generated,
-- predicted behavioral effects,
-- observed effects,
-- unresolved failures and questions.
-
-## Candidate-action generation
-
-Given a node $n$, the coding agent proposes a bounded initial set:
+The practical goal is to discover a strong harness within a finite total search budget. Let the archive contain every generated artifact and let B bound generation and evaluation expenditure. The desired discovery objective is:
 
 $$
-\mathcal{A}(n)=\{a_1,\ldots,a_K\}
+\max_{\mu}\mathbb E\left[\max_{H\in\mathcal A_B}U(H)\right]
 $$
 
-where every $a_i$ is a structured improvement hypothesis $(F,C,M,O)$.
+Here mu is the overall allocation policy, and the archive includes the initial harness. Costs include proposer, policy, value, implementation and judge calls, benchmark execution, and other relevant resources. The initial reward does not subtract cost; total expenditure is constrained and recorded separately.
 
-For each candidate, record:
-
-- supporting evidence,
-- contradictory evidence,
-- expected transfer/generalization,
-- estimated implementation difficulty,
-- predicted behavioral effect,
-- an initial search prior.
-
-The agent supplies a prior-like score, but this score is only **initial guidance**. Search outcomes can override it.
-
-## Three quantities that must remain separate
-
-### 1. Epistemic belief
+For an initial task-success utility:
 
 $$
-B(C_i)\in[0,1]
+U(H)=\mathbb E_{\tau\sim\mathcal D_{\mathrm{Selection}},\,\omega}
+\left[\mathbf 1\{\text{H succeeds on task }\tau\text{ under randomness }\omega\}\right]
 $$
 
-How strongly does current evidence support causal claim $C_i$?
+Thus U lies between zero and one. The task distribution, instances, success validators, underlying agent model, runtime limits, and aggregation weights must be specified. Small-subset measurements estimate a development objective; Confirmation supplies separate validation evidence.
 
-Causal claims are **not assumed mutually exclusive**. Grounding may be unreliable *and* escalation may be missing, so beliefs should not be forced to sum to one.
+**Important distinction:** the approved reward in Section 4 sums to final-descendant utility change, not the maximum utility encountered along a path. Consequently, it is a surrogate for best-artifact discovery. Preserving intermediate harnesses avoids losing a good artifact, but does not make the two mathematical objectives identical. This distinction should remain visible in experiments and claims.
 
-### 2. Search prior
+## 3. State, action, transition, and persistent tree
 
-$$
-\pi(a_i\mid n)
-$$
+### 3.1 Exact artifact state and search context
 
-How much initial search budget should action $a_i$ receive?
-
-This can depend on belief, expected impact, novelty, cost, and transfer potential:
+The artifact state is:
 
 $$
-\pi(a_i\mid n)
-=
-\operatorname{softmax}
-\left(
-f(B(C_i),\text{impact},\text{cost},\text{novelty},\ldots)
-\right)
+s_t=H_t
 $$
 
-The priors are normalized for search allocation even though causal beliefs need not be.
-
-### 3. Empirical branch value
+A search node additionally contains evidence, depth, and controller records:
 
 $$
-Q(n,a)
-=
-\mathbb{E}[\text{future improvement utility}\mid n,a]
+n_t=(H_t,E_t,d_t,R_t)
 $$
 
-How productive has pursuing this improvement direction actually been?
+E includes task results, trajectories, diagnostics, and relevant previous attempts. R includes plans, priors, child identities, visits, returns, and assessment provenance. The discounted continuing target is independent of the search depth cutoff, and Codex predictions depend on supplied evidence; therefore H alone does not describe every input to the controller. No claim is made that code alone is a sufficient Markov state for the complete search process.
 
-Therefore:
+Evaluating a stored harness adds evidence without changing its code. Editing the code creates a new artifact. Preserve exact snapshots; a filename or mutable working directory is not a sufficient identity.
 
-$$
-\boxed{\text{belief }B \neq \text{search prior }\pi \neq \text{empirical value }Q}
-$$
+### 3.2 Action: frozen `PLAN.md` contents
 
-## Tree policy
-
-Use a PUCT-style selection rule:
+A modification action is a concrete intervention specification:
 
 $$
-a^*
-=
-\arg\max_a
-\left[
-Q(n,a)
-+
-c\,\pi(a\mid n)
+a=(\text{target component},\text{operation},\text{conditions/parameters},\text{scope})
+$$
+
+Its supporting hypothesis identifies the observed failure, a candidate cause, and a predicted observable effect. Root causes remain hypotheses until supported by tests.
+
+Each plan must connect:
+
+$$
+\text{failure evidence}\rightarrow\text{causal hypothesis}\rightarrow
+\text{intervention}\rightarrow\text{predicted effect}\rightarrow\text{verification}
+$$
+
+It records evidence, target and scope, implementation constraints, expected code-path or trajectory effects, and checks for alignment and regressions. Prefer distinct interventions over paraphrases. Freeze a selected plan; material revisions create new action versions with provenance.
+
+The same plan at different harnesses belongs to different state-action pairs. A different explanation need not create a different intervention branch, but all context supplied to Codex must be preserved because it can change the implementation.
+
+### 3.3 Stochastic implementation transition
+
+$$
+H_{t+1}\sim T_{\mathrm{Codex}}(\cdot\mid H_t,a_t,E_t)
+$$
+
+Repeated implementation of the same parent-plan pair may produce different patches. This is stochastic generation, not automatically partial observability: the resulting artifact is stored and observable. No geometric action distance or state abstraction is assumed.
+
+The persistent tree alternates between harness nodes and plan nodes. A plan may have several exact implementation children. Each child has its own subsequent plans. Plan nodes do not add modification depth.
+
+Three operations must remain distinct:
+
+| Operation | Effect |
+| --- | --- |
+| Traverse a stored child | Reuse the exact artifact and continue its subtree |
+| Implement a plan again | Sample and store another child of its original parent |
+| Reevaluate a stored child | Gather more evidence about the same artifact |
+
+Selecting a stored child never implicitly reruns Codex.
+
+## 4. Reward and Codex value estimator
+
+### 4.1 Reward and frozen utility
+
+The implemented utility is `F(H) = (1-lambda) U_S0(H) + lambda J(H)`, with
+`lambda=0.1` by default, frozen per run. Setting lambda to zero gives the
+AndroidWorld-only comparison. Immediate rewards remain:
+
+$$
+r_t=F(H_{t+1})-F(H_t).
+$$
+
+Improvement is positive; regression is negative. An intermediate decrease does
+not automatically terminate exploration. Undiscounted immediate differences
+still telescope to final minus initial score, but discounted returns do not.
+We do not sum raw harness scores or change measured performance records.
+
+### 4.2 Discounted continuing prediction target
+
+Codex predicts expected discounted future net change under the declared
+continuation procedure pi, without an explicit remaining-budget input:
+
+$$
+V^\pi(H,E)=\mathbb E_\pi\left[
+\sum_{t=0}^{\infty}\gamma^t(F(H_{t+1})-F(H_t))\mid H_0=H,E
+\right],\qquad 0<\gamma<1.
+$$
+
+`discount_factor=0.9` is the proposed experimental starting point. Discounting
+favors earlier improvement; its geometric weighting has an effective span of
+roughly ten transitions without a hard prediction endpoint. The target depends
+on the proposer, selection, implementation, evaluation, judging, and evidence
+updates in the supplied continuation policy. Proposer and policy roles receive
+the same discount factor and continuation-policy definition/identity as value.
+A discount step counts one harness transition, including stored traversal, not
+failed attempts, token expenditure, or wall-clock time. It is policy expectation, not
+unrestricted optimal harness quality, absolute utility, or best-case potential.
+
+Because F lies in [0,1],
+
+$$
+V^\pi(H,E)=-F(H)+(1-\gamma)\mathbb E_\pi\left[
+\sum_{k=1}^{\infty}\gamma^{k-1}F(H_k)\right],
+\qquad -F(H)\le V^\pi(H,E)\le1-F(H).
+$$
+
+Negative predictions are valid. Actual depth and global run budgets stop
+execution, not the continuing target. Preserve used local branching capacity,
+traverse eligible stored children, and give future nodes their own local slots.
+Plans and implementations evolve under the same procedure; new canonical
+evidence updates priors and discounted statistics. Pending work and assessment
+outages require uncertainty or recovery, not terminality. After genuine
+structural exhaustion, utility remains constant and future rewards are zero.
+
+### 4.3 What Codex returns
+
+Inputs bind the exact artifact, objective, score, evidence and capacity
+snapshots, discount factor, and continuation-policy identity. There is no finite
+value horizon or remaining-depth field. An illustrative response is:
+
+```json
+{
+  "artifact_id": "exact-artifact-id",
+  "status": "completed",
+  "score_snapshot_id": "score-id",
+  "capacity_snapshot_id": "capacity-id",
+  "objective_id": "objective-id",
+  "discount_factor": 0.9,
+  "continuation_policy_id": "policy-id",
+  "value": 0.04,
+  "rationale": "Expected early repairs outweigh discounted later regressions.",
+  "uncertainty": "High: few task observations and an unvalidated continuation.",
+  "evidence": ["context:score_snapshot_id"]
+}
+```
+
+A value of 0.04 predicts discounted net improvement, not a particular final
+utility after a fixed number of modifications. Only the scalar enters backup;
+rationale and uncertainty are retained for review. A prediction is never stored
+as measured benchmark performance. Version the target and backup contract;
+older undiscounted N/W/Q cannot be mixed with these continuing returns.
+
+## 5. Component responsibilities
+
+| Component | Inputs | Output and responsibility |
+| --- | --- | --- |
+| Action proposer | Harness, failures, trajectories, relevant attempts | Distinct causal hypotheses and executable modification plans |
+| Policy estimator | Candidate plans, harness context, supporting and contradictory evidence | Normalized plan priors and priority rationales |
+| Implementation agent | Exact parent, frozen plan, approved context | Exact child artifact, diff, logs, and implementation status |
+| Task evaluator | Exact artifact, versioned tasks and execution configuration | Success outcomes, cost, trajectories, and diagnostics |
+| Value estimator | Frontier artifact, evidence, F snapshot, discount, continuation policy | Expected discounted continuing net utility change |
+| Search controller | Priors, branch statistics, budget and depth | Traversal, expansion, resampling, evaluation allocation and backup |
+
+### Policy estimator and PUCT
+
+The policy estimator returns nonnegative priors that sum to one:
+
+$$
+\sum_{a\in A(n)}P(a\mid n)=1
+$$
+
+Assess causal support, plausible impact, feasibility, regression risk, transfer, and cost. These are allocation preferences, not calibrated causal beliefs or success probabilities.
+
+The initial controller selects:
+
+$$
+a^*=\arg\max_a\left[
+Q(n,a)+c_{\mathrm{puct}}P(a\mid n)
 \frac{\sqrt{N(n)}}{1+N(n,a)}
 \right]
 $$
 
-where:
+Unvisited plan edges start with Q=0 and N=0. Zero denotes initialization. At a parent with zero visits, explicitly choose the highest-prior eligible plan with deterministic tie-breaking. Later selections use PUCT. Priors can be outweighed by observed outcomes.
 
-- $Q(n,a)$: empirical value of action $a$,
-- $\pi(a\mid n)$: initial search prior,
-- $N(n)$: visits / allocated experiments at node $n$,
-- $N(n,a)$: experiments allocated through action $a$,
-- $c$: exploration coefficient.
+**Engineering detail:** use consistent node/edge visit definitions and exclude exhausted or otherwise ineligible branches. Choose and log c_puct. If widening adds plans, version and renormalize priors rather than silently changing their interpretation.
 
-This gives the desired behavior:
+## 6. Tree branching: three alternatives
 
-- promising hypotheses receive early budget,
-- underexplored alternatives remain reachable,
-- empirical downstream success can override the coding agent's initial preference.
+### 6.1 Fixed branching
 
-## Progressive widening
-
-The action space is generative: the coding agent can keep inventing new improvement hypotheses. Unlike Go, there is no fixed finite legal-action set.
-
-To avoid creating a new action on every visit, use progressive widening:
+Limit each expanded harness to three feasible plans. The configured implementation cap in this note is three per parent-plan pair:
 
 $$
-|\mathcal{A}(n)| < kN(n)^\alpha, \qquad 0<\alpha<1
+K_{\mathrm{plans}}=3,\qquad K_{\mathrm{implementations}}=3
 $$
 
-If the inequality holds, the controller may ask the coding agent for another candidate improvement hypothesis. Otherwise, it must select among existing actions.
+Generate fewer plans if three distinct feasible interventions cannot be justified. Earlier one- and two-implementation settings remain useful lower-cost comparisons. The cap controls width; it is not a request to implement three outcomes simultaneously.
 
-Intuition:
+Fixed width is reproducible, but few outcomes may obscure a useful plan. The generation and stored-child selection rules are specified below.
 
-> **More evidence/budget at a node permits more alternative improvement directions, but branch width grows more slowly than the number of visits.**
-> 
+#### Incremental generation and stored-implementation selection
 
-For the first prototype, this can be simplified to a fixed initial set, e.g. 2–3 improvement hypotheses, and generate another only when existing hypotheses have all been tried and the node remains promising.
+Generate **one implementation at a time**, not a batch of all permitted outcomes. The implementation cap is local to an exact parent-plan pair. In the simple fixed-branching controller:
 
-## Stochastic transition: hypothesis → code
+1. Select a plan using harness-level PUCT and Codex plan priors.
+2. If its attempted implementation count, including invalid and pending reserved attempts, is below the cap and generation budget permits, atomically reserve a slot and generate, evaluate, and preserve one new child. Section 8 specifies the proposed attempt-accounting convention.
+3. Otherwise select an eligible stored child using implementation-level PUCT and descend into that exact artifact.
 
-In AlphaGo, executing a move has a known transition:
+Each generation uses one of the three new-attempt slots per trial. At the new child, the controller can immediately select that child's own plans. A revisit does not regenerate an existing artifact. Capacity limits in widening or adaptive branching permit resampling but do not force it; their allocation rule may continue a stored child before filling all slots.
 
-$$
-s_{t+1}=T(s_t,a_t)
-$$
-
-For AlphaAgents, the coding agent is part of the transition:
+For M eligible stored implementations of parent H and plan a, initialize uniform priors:
 
 $$
-H_{t+1}\sim T_\theta(H_t,a_t)
+P_{\mathrm{impl}}(i\mid H,a)=1/M
 $$
 
-The same improvement hypothesis can produce different code patches.
-
-Therefore every expansion must store the **exact generated artifact**:
+Select:
 
 $$
-n_t
-\xrightarrow{(a_t,\Delta H_t)}
-n_{t+1}
+i^*=\arg\max_i\left[
+Q_{\mathrm{impl}}(H,a,i)+
+c_{\mathrm{impl}}P_{\mathrm{impl}}(i\mid H,a)
+\frac{\sqrt{N_{\mathrm{plan}}(H,a)}}{1+N_{\mathrm{impl}}(H,a,i)}
+\right]
 $$
 
-Selecting an existing child again means evaluating or expanding that exact harness. Asking the coding agent to implement the same hypothesis again creates a **new child sample**, not the same transition.
+M is the number currently eligible, not the eventual cap. Recompute the uniform priors when that set changes. Keep implementation-level visits and returns separate from harness-plan statistics. Use a declared tie-breaking/first-visit rule when empirical values are unavailable; normally the generation trial's backup supplies the first return for a valid child.
 
-## Expansion
-
-When action $a=(F,C,M,O)$ is selected:
-
-1. Give the coding agent the parent harness, relevant evidence, and the selected improvement hypothesis.
-2. Ask it to implement modification $M$ as a focused patch.
-3. Materialize an exact child harness.
-4. Check **reasoning–implementation alignment**:
-    - Does the diff actually implement $M$?
-    - Did the intended code path execute?
-    - Were unrelated edits introduced?
-    - Is the predicted mechanism $O$ observable/testable?
-5. Run the screen evaluation.
-
-This lets us distinguish three failure modes:
-
-- **Hypothesis error:** causal explanation $C$ was wrong.
-- **Intervention/design error:** proposed modification $M$ was insufficient or inappropriate.
-- **Implementation error:** the generated code did not faithfully realize $M$.
-
-## Evaluation protocol
-
-### 1. Screen
-
-Cheap, search-visible checks:
-
-- runtime / syntax validity,
-- targeted diagnostic probe,
-- target task,
-- minimal regression checks,
-- whether the modified path actually executed.
-
-Failing candidates can be rejected cheaply.
-
-### 2. Selection
-
-Broader development evaluation used by tree search:
+**Value convention:** implementation Q is measured relative to the original plan's parent, so it includes both the implementation's immediate reward and its subsequent continuation return:
 
 $$
-U_{\text{selection}}(H)
+Q_{\mathrm{impl}}(H,a,i)\approx
+F(H_i)-F(H)+\gamma V^\pi(H_i,E_i)
 $$
 
-Selection results can update $Q$, retention decisions, and search allocation.
+This expression specifies the return target; Q is the mean of backed-up trial returns, not a fresh Codex score recomputed at every selection.
 
-### 3. Confirmation
-
-Protected held-out tasks / fresh runs:
+If G_t is the return for the harness-plan edge whose selected implementation is i, update that implementation with the same G_t:
 
 $$
-U_{\text{confirm}}(H)
+N_{\mathrm{impl}}(H,a,i)\leftarrow N_{\mathrm{impl}}(H,a,i)+1,\qquad
+W_{\mathrm{impl}}(H,a,i)\leftarrow W_{\mathrm{impl}}(H,a,i)+G_t,\qquad
+Q_{\mathrm{impl}}=W_{\mathrm{impl}}/N_{\mathrm{impl}}
 $$
 
-Confirmation is used for promoted candidates and final claims. It should **not be repeatedly backpropagated into ordinary search**, otherwise the held-out set becomes another optimization set.
+Both bookkeeping levels receive one update per trial traversal. Do not add the immediate utility-change reward twice or count the plan-to-implementation bookkeeping step as another modification depth.
 
-## Reward and backup
+Uniform random outcome sampling would serve estimation of the stochastic implementation distribution. PUCT over stored children serves deliberate allocation to persistent artifacts with promising continuation returns. Thus plan Q summarizes returns under this allocation policy; it is not an unbiased estimate of a fresh random implementation's effectiveness. Current utility alone is not the selection criterion: a lower-scoring child can be a productive stepping stone.
 
-Store an absolute harness utility:
+The implementation-level exploration coefficient remains to be specified. Section 8 proposes counting invalid outcomes against attempt capacity while excluding them from scored continuation; assess this convention experimentally.
 
-$$
-U(n)
-$$
+### 6.2 Double progressive widening
 
-based on task performance, regression, validity, and possibly cost.
-
-Use **parent-relative improvement** as the immediate reward:
+Allow plan and implementation branching to grow with visits:
 
 $$
-r_t=
-U(n_{t+1})-U(n_t)-\lambda_c C_t
+K_a(n)=\max(3,\lfloor k_a(N(n)+1)^\alpha\rfloor),\quad 0<\alpha<1
 $$
 
-where $C_t$ is generation/evaluation cost.
-
-For a path
-
 $$
-n_0\xrightarrow{a_0}n_1
-\xrightarrow{a_1}\cdots
-\xrightarrow{a_{L-1}}n_L
+K_o(n,a)=\max(1,\lfloor k_o(N(n,a)+1)^\beta\rfloor),\quad 0<\beta<1
 $$
 
-define downstream return:
+A new plan may be admitted below K_a. Another Codex implementation may be sampled below K_o. Otherwise reuse stored children. These are capacity limits, not requirements to generate new branches.
+
+The method handles open-ended proposals without needing geometry. Its weakness is that visit counts do not directly establish whether another generation deserves its cost.
+
+**Interpretation:** empirical-frequency sampling of children estimates the implementation transition distribution. Deliberately choosing promising stored artifacts instead implements discovery-oriented allocation. In the latter case, Q summarizes returns under that allocation process; it should not be presented as an unbiased estimate of a freshly sampled plan's effectiveness.
+
+### 6.3 Adaptive branching
+
+Use outcome evidence and uncertainty to allocate among:
+
+1. Proposing and implementing a new plan.
+2. Resampling an existing plan at its original parent.
+3. Continuing from an existing exact child.
+
+AB-MCTS motivates feedback-driven generation versus descent. Our explicit plan/implementation separation is an adaptation, not an already specified component of that method.
+
+A Thompson-sampling alternative compares sampled predictive outcomes for these allocation choices. Its predictive model and cost treatment must be specified before implementation. Do not assume that this alternative automatically uses the same PUCT formula. Compare complete controllers rather than mixing incompatible selection semantics without explanation.
+
+**Deferred methods:** HOOT, Continuous RAVE, and abstraction refining require meaningful partitions or similarity representations that we have not validated for plans and harnesses. Equal scores or similar wording do not establish similar continuation value.
+
+## 7. Horizon, trial length, and continuation
+
+**Agreed settings:**
 
 $$
-G_t=
-r_t+\gamma r_{t+1}+\gamma^2r_{t+2}+\cdots
+D=8,\qquad L_{\mathrm{new}}=3,\qquad \gamma=0.9\text{ initially}
 $$
 
-Then use ordinary empirical MCTS backup:
+The run allocates 30 trials, with at most 90 new implementation attempts in total. This is an upper bound on generation, not a promise of 90 valid children or independent measurements. Two asynchronous workers reserve trial IDs from one shared counter; no worker launches trial 31.
+
+The local root has depth zero. Every stored parent-child harness transition adds one depth level. Resampling a plan creates a sibling at the same depth as its other implementation outcomes. Plan nodes add no depth.
+
+A trial starts at the root, traverses existing branches, and creates up to three new implementation attempts along its selected continuation. Stored traversal consumes depth but no new implementation slots. Invalid attempts consume computation slots but do not create a valid continuation state.
+
+For example, frontiers at depth three, five, and eight all request expected discounted continuing improvement under the same frozen discount and procedure. There is no remaining-budget input.
+
+At depth eight, create no further modification children, but still invoke the value estimator for the discounted continuing target and back up its bounded prediction. For forecasting only, allow counterfactual continuation beyond the search depth limit using the same policy and branching constraints. Return to root selection after the trial. Preserve all intermediates. Stop early for budget limits, invalid continuation, or no feasible next plan; do not stop solely because one reward is negative.
+
+This is **multi-step persistent tree expansion with frontier bootstrapping**, rather than a separate random rollout. The same controller chooses continuation plans after fresh evaluation evidence is available.
+
+**Proposed terminal convention:** if a valid branch genuinely cannot continue, treat its utility as constant thereafter and use zero future change. Distinguish this from a computational cutoff, where bootstrap applies. Explicit stop actions and handling invalid implementations remain open.
+
+## 8. Evaluation design and six-device execution
+
+### Operating configuration and status
+
+Use 30 trials, up to three new implementation attempts per trial, three plans per harness, and up to three implementation attempts per plan. Actual search depth remains capped at eight; the continuing prediction uses gamma=0.9 by default and has no finite horizon. Generate implementations incrementally; these caps do not require eagerly generating nine children at each harness.
+
+**Recommended evaluation configuration:** freeze half of Selection for intermediate rewards and run two asynchronous trial workers sharing a pool of at most six devices. The half-Selection fraction and scheduler are the concrete proposal following the user's request; exact task membership, runtime limits, and validation budget must be recorded before execution.
+
+Thirty trials permit at most 90 new implementation attempts, not 90 guaranteed valid children. Stored-child traversal creates no new implementation. A trial can finish after fewer attempts because of depth, failure, or budget limits. Record every launched trial, including failed or empty trials; do not quietly replace failures with unlimited additional trials.
+
+### Evaluation stages
+
+| Stage | When | Purpose and accounting |
+| --- | --- | --- |
+| Full Screen | Root and every newly generated child that can execute | Eligibility and basic functionality. Reference time: approximately 20 minutes with three devices. |
+| Targeted checks | Every new child, as applicable to its plan | Mechanism evidence; record additional cost separately. Targeted success is not the overall reward. |
+| Fixed half-Selection S0 | Root and every Screen-valid new child | Current utility, immediate reward, and continuation evidence. Half the tasks need not mean half the runtime. |
+| Full Selection | Evidence-triggered candidates and final shortlist | Stronger development measurement. User-provided reference: up to three hours with three devices. |
+| Confirmation | Frozen final shortlist and baseline | Protected validation; exclude results and trajectories from routine search feedback. |
+
+Passing Screen means passing a declared eligibility rule, not solving every Screen or Selection task. Declare that rule before the run. Ordinary benchmark task failures receive their defined outcome; evaluator/device outages are infrastructure failures and must not be converted into task failures.
+
+### Constructing and freezing the half-Selection subset
+
+Let S be the versioned full Selection task manifest and choose |S0|=ceil(|S|/2). If S contains 20 tasks, use 10; the actual manifest count must be checked. Use a recorded seed to sample within task strata covering apps, task types, multi-step difficulty, and important failure modes. Use baseline metadata to construct strata, not candidate performance to cherry-pick tasks. Publish selected and remaining task IDs, stratum counts, aggregation weights, and sampling seed in the run manifest.
+
+Use the same S0 throughout all 30 trials. Each child evaluates the entire S0, not a fresh random half. This supplies matched comparisons and keeps backed-up rewards on one objective. It also creates a development set that can be overfit; full Selection and protected Confirmation address different parts of that limitation.
+
+For completion-rate utility, store each task outcome y and use the predeclared weighted mean:
+
+$$
+\widehat U_{S_0}(H)=\sum_{j\in S_0}w_j y_j(H),\qquad \sum_j w_j=1
+$$
+
+Use equal weights if the benchmark objective is an unweighted mean and sampling preserves its composition adequately. If stratification changes proportions, predeclare weights reflecting the full Selection objective. Report both subset and full-set coverage. Half is a starting allocation, not a statistical guarantee: a small or highly correlated task set may still rank close candidates poorly.
+
+Freeze model version, evaluator, task instances, reset procedure, limits, and controllable seeds. Store per-task trajectories and scores. Cache by exact artifact plus this complete execution configuration; parent or stored-child traversal normally reuses those records. A new execution configuration requires a matched comparison or separate statistics.
+
+### Reward, value prediction, and fidelity
+
+Search uses:
+
+$$
+\widehat r_t=\widehat F(H_{t+1})-\widehat F(H_t),\qquad 0<\gamma<1
+$$
+
+Screen and targeted checks are gates or diagnostics, not additive rewards. Negative measured reward is permitted. Do not subtract a full-Selection parent score from a half-Selection child score.
+
+Codex's frontier value must predict discounted continuing net change using the same frozen F as immediate rewards and Q:
+
+$$
+\widehat V(H,E)\approx
+\mathbb E_\pi[\sum_{t\ge0}\gamma^t(\widehat F(H_{t+1})-\widehat F(H_t))\mid H,E]
+$$
+
+Supply subset/objective/score/evidence identities, task and judge weights, evaluation conditions, discount factor and continuation-policy identity. Since F lies in [0,1], the value range is [-F(H),1-F(H)]. At depth eight still forecast continuing discounted improvement; do not force zero because actual expansion stops. Current completion rate is already accounted for by utility-change rewards; do not add it to the frontier value.
+
+Maintain separate Screen, S0, full-Selection, and Confirmation records. Full Selection can inform development hypotheses and a logged promotion decision, but does not silently overwrite Q rewards. If the subset, weighting, or objective changes, start a new statistics version or explicitly rebuild backups. Section 9's reverse-backup equations remain unchanged.
+
+### Full Selection and final validation
+
+**Proposed defaults:** nominate up to three distinct artifacts by measured S0 utility at search completion, together with the root baseline. Preserve structural diversity as a tie-breaker and log it. During search, allow a full-Selection promotion when a candidate becomes a new provisional incumbent or a close comparison would determine a large continuation allocation; queue promotions and enforce the reserved evaluation budget rather than evaluating every small improvement automatically.
+
+Complete full Selection for the nominees, then rank by its measured objective with uncertainty and regressions reported. A high Q is insufficient because Q includes predicted future improvement. If a nominee's full score reveals a discrepancy, log it and use the remaining preallocated development budget; never treat Confirmation as repair feedback.
+
+When full Selection uses precisely the same task instances and evaluation conditions, reuse the candidate's existing S0 outcomes and evaluate S minus S0. Otherwise run a complete fresh matched evaluation and label it as such. Aggregate individual task outcomes with full-set weights; do not average the two half means unless task counts and weights justify that operation.
+
+Freeze the final shortlist before Confirmation. Confirm it and the baseline under a common protocol, retaining every confirmed result. Choosing the winner using Confirmation makes that set part of model selection; an independent final performance claim requires an untouched test or later fresh evaluation.
+
+**Proposed budget reservation:** reserve 20–30% of total device-hours for broader Selection, repeats, baseline comparisons, and Confirmation, then check that this covers the actual shortlist cost. This percentage is a planning default, not an agreed or sufficient budget. Confirmation duration has not been supplied. If 30 trials plus validation exceed available device-hours, reduce intermediate expansions or extend the run; keep the trial count, actual attempts, and validation coverage explicit.
+
+### Parallel trial and device scheduler
+
+Start with two asynchronous trial workers, each usually requesting three devices for its current evaluation. Trial 2 need not wait for trial 1's full continuation or backup. Within one trial, the next modification depends on its child's evidence; evaluate that child before proposing the next continuation. Three sequential modifications cannot be evaluated concurrently as if they were independent.
+
+Use one device pool and per-task job queue, not two permanently partitioned device groups. Each job carries artifact/configuration identity, stage, task ID, isolated reset requirements, estimated runtime, deadline, and trial ID. Assign individual tasks to free compatible devices; allow one evaluation to borrow idle capacity while the other worker is implementing or waiting. Six devices can accelerate a single batch when tasks are independent, but speedup depends on task count, runtime imbalance, and reset overhead.
+
+For long Selection batches, prioritize long tasks using measured historical durations to reduce the tail, with fairness across trials so one batch cannot starve the other. Screen-valid children enter S0; rejected children release remaining jobs and reservations. Keep immutable code/configuration per task and reset app/device state between runs to prevent cross-artifact contamination. Pipeline Codex generation and assessment with unrelated evaluation jobs where independent.
+
+Do not increase active trials solely to fill six devices: begin with two, measure device utilization and pending-selection collisions, and increase worker concurrency only if generation waits leave sustained idle devices and the evaluation queue can support more workers.
+
+### Concurrent tree safety and exactly-once backup
+
+Protect only short tree operations with a lock or transaction; never hold it during Codex calls or task evaluation. Atomically reserve trial IDs 1–30 and plan implementation slots. Count successful, failed, and currently reserved implementation attempts against the plan cap of three. Two workers may intentionally sample the same plan in different reserved slots, but must not accidentally produce the same slot twice.
+
+Track pending path reservations separately from completed visit counts. **Proposed initial scheduling rule:** prefer an eligible unreserved edge when alternatives exist; if all useful edges are reserved, wait for a result rather than repeatedly launching duplicate continuations. Apply this at plan and implementation selection. A recorded pending-count exploration adjustment is an alternative for later experiments, not measured reward.
+
+Use completed N, W, Q for backed-up evidence. Do not count a pending trial as a completed visit or assign a fabricated negative return. Release reservations on completion, cancellation, or failure. A shared stored implementation can be revisited after release; cache reuse is not another independent benchmark observation.
+
+Each trial logs the ordered valid path, exact reward snapshot IDs, frontier prediction, and unique backup ID. Commit reverse backup atomically once: both selected plan and implementation receive the corresponding parent-relative G_t once, while the reward and depth are counted only once. Retried persistence must not repeat the backup. Persist reservations and checkpoints so interrupted jobs can resume or be explicitly cancelled.
+
+### Failure and reevaluation policy
+
+**Proposed initial convention:** an invalid implementation consumes its attempt and plan slot and cannot be traversed; log it without inventing S0 utility. End that trial's continuation and bootstrap from its last valid frontier, backing up only existing valid transitions. If there is no valid traversed transition, record a failed trial without a Q update. This means invalid-attempt rate is not directly penalized in Q; report it separately and assess whether a later feasibility/cost model is needed.
+
+Infrastructure faults retry the affected task once by default after reset; repeated infrastructure faults mark the evaluation incomplete and quarantine the device or job for investigation. A genuine agent failure or timeout uses the benchmark's declared score. Incomplete children stay ineligible for scored traversal until evaluation is completed or the attempt is cancelled. Do not fabricate missing outcomes.
+
+Keep one fixed, versioned evaluation snapshot per artifact during the initial search. Extra repeats and full-Selection measurements are separate evidence; adopting a corrected S0 score requires a declared statistics rebuild. Repeated tree visits using cached outcomes do not increase the benchmark sample size.
+
+### Runtime planning and monitoring
+
+With three devices, the supplied reference timings are Screen approximately 20 minutes and full Selection up to 180 minutes. If runtime scales roughly with task count, half Selection is approximately 90 minutes and a valid child's evaluation approximately 110 minutes. This half-set estimate must be checked on the baseline; it is not a measured upper bound.
+
+For 30 trials each creating three valid children, two concurrent evaluations give the reference scenario:
+
+$$
+90\text{ children}\times110\text{ minutes}/2
+=4{,}950\text{ minutes}=82.5\text{ hours}
+$$
+
+That is roughly 3.4 days of intermediate evaluation under full utilization and the stated scaling assumptions. It excludes root evaluation, targeted checks, Codex time, resets, queue imbalance, retries, full-Selection promotions, repeats, and Confirmation. Fewer expansions lower cost. A cached other-half full-Selection completion costs approximately another 90 minutes per candidate with three devices only under the same linear assumptions.
+
+Record device-hours as well as wall time. Using six devices for one batch rather than two groups of three can lower that batch's latency without improving total throughput. Measure baseline Screen and S0 duration distributions first, then revise the schedule and total cost estimate.
+
+Dashboard/log essentials: trials launched/completed/failed; attempts and valid children; device utilization; queue wait; per-stage task durations; device-hours by stage; completed versus pending tree visits; provisional and full utility of incumbents; value-prediction contributions; validation budget remaining. Report actual coverage and costs alongside the final artifact.
+
+### Agent-as-a-Judge alongside per-child Android evaluation
+
+**Agreed initial direction:** run a bounded reviewer assessment for every newly implemented child, in parallel with Android evaluation where inputs are available. Review each exact artifact once per evidence/configuration version; a stored-node revisit reuses the assessment. For an invalid child, retain any available code-level findings, but do not invent execution evidence.
+
+The Android evaluator measures task outcomes and current utility. The agent judge evaluates whether the intervention follows the frozen plan and whether observed execution supports its hypothesis. These are separate records and roles.
+
+#### Inputs and review dimensions
+
+Give the reviewer the frozen PLAN.md, exact parent and child artifacts, diff, relevant parent failures, targeted-check results, and available child trajectories. Use a separate reviewer context from the implementer and a fixed rubric. Confirmation evidence remains excluded.
+
+| Dimension | Review question | Required evidence |
+| --- | --- | --- |
+| Plan alignment | Does the executable implementation realize the proposed intervention? | Plan requirement and specific code/configuration references; identify missing or contradictory behavior. |
+| Mechanism activation | Did the changed behavior execute, and is its effect consistent with the hypothesis? | Relevant trajectory events and code paths; distinguish predicted behavior from observed activation. |
+| Generalization and task specificity | Is the repair reusable, or dependent on one task's names, coordinates, or sequence? | Specific conditions, hardcoded assumptions, and available cross-task evidence. A general-looking patch alone does not establish transfer. |
+| Regressions | Does the patch introduce conflicting behavior or remove useful functionality? | Diff and execution evidence, with affected components and tasks identified. |
+
+Example: task success after a recovery patch does not prove the recovery mechanism was used. The judge should report whether the modified recovery path activated, what happened next, and what remains unverified. Without a controlled comparison, mechanism support is not proof of causality.
+
+#### Parallel workflow and cost limits
+
+1. After storing the immutable child, start code/plan review while Android Screen and applicable targeted tests execute.
+2. As child trajectories become available, supply them to the same bounded review job and finalize execution-grounded findings after the relevant S0 evidence arrives. Trajectory review cannot finish before that evidence exists.
+3. Attach completed findings to the child's development evidence for subsequent plan proposal, policy assessment, and frontier value prediction.
+
+Set a fixed per-child call/token and wall-time budget before the run. Exact limits remain an engineering parameter. Initially inspect relevant trajectories within this budget rather than launch an unbounded investigation or extra device experiments. Explicitly requested follow-up tests use the existing evaluation queue and have separate costs.
+
+**Proposed scheduling default:** wait for the finalized review only within its declared deadline before the next evidence-consuming Codex call; on timeout proceed with available findings marked partial. Judge failure or delay must not turn a measured Android result into a task failure. Later findings apply to future decisions; they do not trigger another backup for the completed trial.
+
+#### Explicit output and evidence discipline
+
+Produce a structured assessment containing artifact/plan IDs, reviewer and rubric versions, evidence snapshot IDs, and one finding per dimension. Each finding includes an assessment such as supported, contradicted, or insufficient evidence; cited code locations/trajectory events; a concise rationale; and uncertainty. Record suspected issues separately from observed violations, plus prioritized next checks and total cost. These labels are qualitative findings, not calibrated probabilities.
+
+Require evidence references for substantive claims and allow insufficient evidence. Treat the implementer's explanation as a claim to check. Keep observed facts, hypotheses, and recommended tests distinct. Version the assessment when new evidence arrives; cache reuse is not an independent judge vote.
+
+#### Integration with search
+
+Retain the approved utility-change reward and reverse backup unchanged:
+
+$$
+r_t=\widehat U_{S_0}(H_{t+1})-\widehat U_{S_0}(H_t)
+$$
+
+Judge findings may inform the next proposer, policy estimator, and Codex value assessment as explicitly labeled evidence. Do not add a judge score to reward, substitute it for Android completion outcomes, or create an extra N/W/Q update. The frontier value remains expected future net utility change on S0, not a plan-quality score.
+
+Subjective concerns prompt investigation rather than automatic rejection. Any hard eligibility rejection must follow a predeclared rule supported by verifiable evidence. Log judge/evaluator disagreement and examine it without silently overriding benchmark outcomes.
+
+#### Evaluation of the judge itself
+
+For the 30-trial experiment, record per-child judge costs and findings and assess whether they predict full-Selection regressions, identify implementation–plan mismatches, and help subsequent interventions. Audit a sample manually for unsupported claims and missed problems. Compare search with and without judge feedback under matched total cost; predictive correlation alone does not prove that feedback improves search.
+
+The initial role is now specified; reviewer model, exact resource limits, trajectory-selection policy, and audit rubric remain open. Agent-as-a-Judge: Evaluate Agents with Agents motivates intermediate evidence-based evaluation, but its code-generation findings do not establish reliability in this mobile harness setting.
+
+## 9. Bootstrap and backup
+
+A trial records harness transitions and their matched reward estimates. At frontier H_L:
+
+$$
+\widehat v_L=
+\begin{cases}
+\widehat V^\pi(H_L,E_L,8-d_L),&d_L<8\text{ and continuation is possible}\\
+0,&d_L=8\text{ or a defined terminal stop}
+\end{cases}
+$$
+
+Back up in reverse order:
+
+$$
+G_L=\widehat v_L,\qquad G_t=\widehat r_t+\gamma G_{t+1}
+$$
+
+For each traversed harness-plan edge:
 
 $$
 N(n_t,a_t)\leftarrow N(n_t,a_t)+1
 $$
 
 $$
-Q(n_t,a_t)
-\leftarrow
-Q(n_t,a_t)
-+
-\frac{G_t-Q(n_t,a_t)}{N(n_t,a_t)}
+W(n_t,a_t)\leftarrow W(n_t,a_t)+G_t,\qquad
+Q(n_t,a_t)=W(n_t,a_t)/N(n_t,a_t)
 $$
 
-This propagates downstream utility only along the path actually explored.
+Plan nodes introduce no extra reward or discount step. Record node visits consistently. For each selected implementation, also update its own N_impl, W_impl and Q_impl with the same parent-relative G_t used for that plan edge. These are two bookkeeping updates of one return, not two rewards.
 
-The absolute utility $U(n)$ is still retained for comparing and selecting final harnesses.
+Include cached transition rewards for stored edges traversed during the trial. Reusing an edge in a new trial contributes that trial's continuation return; it does not constitute a new independent benchmark evaluation. Each edge receives one update per trial, not intermediate updates plus another duplicate final update.
 
-## Belief update is separate from value backup
+### Numerical example
 
-Search-value backup should **not** be interpreted as proving a causal hypothesis true.
+For an AndroidWorld-only comparison (judge weight zero), starting from root utility 0.60, generate:
 
-Evaluation can produce four qualitatively different outcomes:
-
-| Predicted mechanism changed? | Benchmark improved? | Interpretation |
+| Harness | Small-subset utility | Reward |
 | --- | --- | --- |
-| Yes | Yes | Mechanism supported and intervention useful |
-| Yes | No | Mechanism may be correct, but intervention has poor utility / causes regressions |
-| No | Yes | Performance improved, but likely not for the claimed reason |
-| No | No | Hypothesis, implementation, or both are unsupported |
+| H0 | 0.60 | — |
+| H1 | 0.65 | +0.05 |
+| H2 | 0.62 | -0.03 |
+| H3 | 0.70 | +0.08 |
 
-Update $B(C)$ from diagnostic/mechanistic evidence. Update $Q(n,a)$ from empirical downstream utility. Keep these updates separate.
+At depth three, Codex predicts discounted continuing value 0.04. With the illustrative gamma=0.9, returns are:
 
-## Example
+$$
+G_2=0.08+0.9(0.04)=0.116,\qquad
+G_1=-0.03+0.9(0.116)=0.0744,\qquad
+G_0=0.05+0.9(0.0744)=0.11696
+$$
 
-Observed failure:
+These update the three respective plan edges. For a first visit, Q equals that return; later it is the average of accumulated returns. They represent changes relative to each edge's parent. The frontier score 0.70 is not added as an extra reward.
 
-> The mobile agent repeatedly executes the same action pattern without making progress.
-> 
+For a path with L explicit transitions:
 
-Candidate improvement hypotheses:
+$$
+G_t=\sum_{k=t}^{L-1}\gamma^{k-t}\widehat r_k+\gamma^{L-t}\widehat v_L
+$$
 
-- $a_1$: **Improve grounding verification** because repeated taps may be caused by incorrect target coordinates; expect target confirmation accuracy to improve.
-- $a_2$: **Add failure escalation and replanning** because repetition is detected but does not alter control flow; expect loops to terminate and a new plan to be produced.
-- $a_3$: **Add UI-state-change detection** because the harness cannot recognize that an action had no effect; expect unchanged states to trigger recovery.
-- $a_4$: **Generalize the repetition signature** because recovery exists but the detector misses semantically equivalent action cycles; expect more loops to be recognized.
+This makes measured versus predicted contributions explicit. Across trials, keep the discount, utility, and continuation-policy identities consistent. These allocation returns are distinct from best retained artifact performance.
 
-Possible tree:
+## 10. Controller procedure and implementation records
+
+The following pseudocode describes the logic inside one trial worker of the fixed-branching controller with incremental implementation generation and two-level PUCT. Run up to two workers under Section 8's shared trial counter, device queue, slot reservations, and atomic backup rules. K_implementation is the configured cap (currently three in this note). Widening and adaptive variants retain their own resampling-versus-continuation allocation rules.
 
 ```
-H0
-├── a1: grounding verification
-│   └── H1
-├── a2: failure escalation + replan
-│   └── H2
-│       ├── a21: pass failure context to planner → H4
-│       └── a22: adjust escalation condition → H5
-├── a3: UI-state-change detection
-│   └── H3
-└── a4: generalize repetition detector
-    └── H6
+coordinator evaluates root once on Screen and common subset S0
+coordinator stores immutable root and initializes shared tree
+
+# two workers execute the following loop
+while budget permits and atomically reserve_next_trial_id(maximum=30):
+    node = root
+    path = []
+    new_attempts = 0
+
+    while node.depth < 8:
+        register up to 3 distinct plans if needed
+        obtain/version normalized plan priors
+        atomically choose eligible plan and reserve path/attempt slot if needed
+        # recheck capacity in the same transaction; wait/reselect on contention
+
+        if a new implementation-attempt slot was reserved:
+            if new_attempts == 3 or generation budget is insufficient:
+                break
+            i = reserved implementation-attempt slot ID
+            implement frozen plan on exact parent once
+            new_attempts += 1
+            store attempt, artifact, diff and logs
+            launch bounded judge code/plan review in parallel
+            run Screen and targeted checks
+            if invalid:
+                record failure; invoke declared failure/capacity policy
+                break
+            evaluate child on S0; stream relevant trajectories to judge
+            finalize judge within its deadline, or record partial/unavailable findings
+            attach labeled judge findings to development evidence
+            register this exact child as implementation i of the plan
+        else:
+            if no eligible stored implementation exists:
+                invoke declared failure policy
+                break
+            i = implementation_PUCT(plan, uniform_priors)
+            child = exact stored artifact of implementation i
+
+        reward = cached matched frozen combined F difference(child, node)
+        append (node, plan, i, child, reward) to path
+        node = child
+
+        if new_attempts == 3:
+            break
+
+    if path is nonempty:
+        frontier_value = 0 if structurally_exhausted else CodexValue(node, discount_factor, continuation_policy_id)
+        reverse-backup G = reward + discount_factor * next_G exactly once
+        update both plan-edge and selected-implementation statistics with each G_t
+
+    allocate full Selection when evidence triggers it
+    record costs and persist trial state
+
+# coordinator, once all workers have joined and reservations are released
+shortlist measured candidates and complete full Selection
+run Confirmation on frozen shortlist and baseline
+return an exact stored artifact with its evaluation report
 ```
 
-Suppose $a_2$ has only moderate prior, but H2 and its descendants repeatedly improve several tasks with limited regression. Then $Q(H_0,a_2)$ rises and the controller allocates more budget to that branch.
+A declared failure policy is required before this loop is production-ready. An invalid patch must not receive a fabricated Selection score or disappear from the cost ledger. Distinguish harness failures from infrastructure failures such as an unavailable emulator or broken evaluator.
 
-This is analogous to AlphaGo allowing empirical search evidence to override the policy network's initial preference.
+### Required records
 
-## Relationship to the two AlphaAgents search levels
-
-### RQ1 — Global lineage search
-
-Question:
-
-> **Which harness / archive region should receive the next improvement budget?**
-> 
-
-The global controller tracks statistics such as:
-
-$$
-Q_G(H),\;N_G(H)
-$$
-
-and allocates a local search budget $b_H$ to a selected parent.
-
-### RQ2 — Local improvement-hypothesis search
-
-Question:
-
-> **Given the selected parent, what should the coding agent try to change next?**
-> 
-
-The local controller tracks:
-
-$$
-B(C),\;\pi(a),\;Q_L(n,a),\;N_L(n,a)
-$$
-
-The two levels should initially have **separate statistics**, because their visits and values refer to different decisions.
-
-Conceptually:
-
-$$
-\text{Global parent selection}
-\rightarrow
-\boxed{\text{local improvement-hypothesis search}}
-\rightarrow
-\text{new child harnesses}
-\rightarrow
-\text{global archive update}
-$$
-
-The global controller allocates budget to a parent; the local controller decides how that budget is spent across improvement hypotheses.
-
-## Tree traversal: revisit existing children vs. expand a new child
-
-One local MCTS simulation should perform **selection repeatedly down the existing tree**, expand at most one new child, evaluate that new leaf, and then backpropagate through the full selected path.
-
-At node $n$:
-
-1. Ensure candidate improvement hypotheses $\mathcal{A}(n)$ exist. If progressive widening permits, the controller may add a new candidate action.
-2. Use PUCT to choose an action $a^*$.
-3. If $a^*$ has **not yet been implemented**, stop tree traversal and **expand** it by generating one concrete child harness.
-4. If $a^*$ already has an exact child harness, **revisit and descend into that child** rather than generating another patch.
-5. Repeat selection from that child until an unexpanded action is chosen.
-
-For the first implementation, use **one concrete child per improvement hypothesis**. This makes the transition rule simple:
-
-$$
-\text{selected action unexpanded} \Rightarrow \text{implement and create child}
-$$
-
-$$
-\text{selected action already expanded} \Rightarrow \text{descend into existing child}
-$$
-
-Later, if we want multiple stochastic implementations of the same improvement hypothesis, add a second progressive-widening rule over concrete implementations. Those regenerated implementations should be treated as distinct children.
-
-Example:
-
-```
-H0
-├── a1 → H1
-├── a2 → H2
-│         ├── a21 → H4
-│         └── a22 → H5
-└── a3 → H3
-```
-
-Suppose PUCT selects $a_2$ at $H_0$. Since $a_2$ has already been expanded, the simulation descends to $H_2$. At $H_2$, PUCT selects $a_{22}$. If $a_{22}$ is also already expanded, descend to $H_5$ and continue. If instead PUCT selects an unexpanded $a_{23}$, the coding agent implements $a_{23}$ once, creating a new leaf $H_6$.
-
-Thus a simulation path can be:
-
-$$
-H_0
-\xrightarrow{a_2}
-H_2
-\xrightarrow{a_{22}}
-H_5
-\xrightarrow{a_{53}}
-H_6
-$$
-
-where only the final edge $a_{53}$ is newly expanded in that simulation.
-
-After evaluating $H_6$, backpropagate its downstream return along **all selected edges**:
-
-$$
-(H_5,a_{53}),\;(H_2,a_{22}),\;(H_0,a_2)
-$$
-
-This is what allows an early improvement hypothesis to gain value from useful descendants several generations later.
-
-## One full local MCTS simulation
-
-```jsx
-INPUT:
-    local root n0 = selected parent harness
-    local search tree T
-    remaining local budget b
-
-path ← []
-n ← n0
-
-1. SELECTION / DESCENT LOOP
-
-   while True:
-
-       failures ← GetRelevantFailures(n)
-       evidence ← LoadEvidence(n)
-       actions ← LoadExistingImprovementHypotheses(n)
-
-       if actions are insufficient
-          or ProgressiveWideningAllowsNewAction(n):
-
-           new_actions ← Agent.GenerateImprovementHypotheses(
-               n.code,
-               failures,
-               evidence,
-               prior experiments at n
-           )
-
-           store each action as:
-               target failure
-               causal claim
-               proposed modification
-               predicted outcome
-               evidence for/against
-               belief score
-
-           derive / update search priors π(a|n)
-
-       a* ← argmax_a [
-           Q(n,a)
-           + c π(a|n) sqrt(N(n)) / (1 + N(n,a))
-       ]
-
-       path.append((n, a*))
-
-       if a* has NO concrete child yet:
-           break                       # expand this action
-
-       n ← ExistingChild(n, a*)       # revisit and descend
-
-2. EXPANSION
-
-   patch ← CodingAgent.Implement(n, a*)
-   child ← MaterializeExactHarness(patch)
-
-   attach child to edge (n, a*) in T
-
-3. ALIGNMENT CHECK
-
-   verify:
-       diff implements selected modification
-       intended path executes
-       unrelated edits are recorded
-       predicted mechanism can be tested
-
-   if invalid:
-       leaf_return ← InvalidExpansionPenalty
-       Backpropagate(path, leaf_return)
-       stop simulation
-
-4. SCREEN
-
-   screen_result ← RunScreen(child)
-
-   if clearly failed:
-       update local evidence / causal belief
-       leaf_return ← ScreenFailureReturn
-       Backpropagate(path, leaf_return)
-       stop simulation
-
-5. SELECTION EVALUATION
-
-   result ← EvaluateSelectionSet(child)
-   U_child ← Utility(result)
-
-6. BELIEF UPDATE
-
-   update B(C) for the selected action using
-   mechanistic / diagnostic observations
-
-   recompute π where relevant
-
-7. LEAF RETURN
-
-   For each ancestor node nt on path, define:
-
-       G_t ← U(child) - U(nt) - λ_cost * C_sim
-
-   where C_sim is the NEW cost incurred by this simulation
-   (generation + screen + evaluation of the new leaf).
-
-   Do not charge historical generation costs again merely
-   because an existing child was revisited.
-
-8. BACKUP
-
-   for each (nt, at) in path:
-
-       N(nt)    ← N(nt) + 1
-       N(nt,at) ← N(nt,at) + 1
-
-       Q(nt,at) ← Q(nt,at)
-                  + (G_t - Q(nt,at)) / N(nt,at)
-
-9. ARCHIVE UPDATE
-
-   if child passes retention criteria:
-       add exact child to local/global archive
-
-10. OPTIONAL CONFIRMATION
-
-    if child satisfies promotion criteria:
-        evaluate on protected confirmation set
-        record result
-        do not routinely feed confirmation back into search
-```
-
-A **local search episode** consists of repeating these simulations until the budget $b$ is exhausted. The global controller then receives the local-search outcome and updates its parent-selection statistics.
-
-## Difference from current DGM-style mutation
-
-Current style:
-
-```
-select parent
-→ ask coding agent for a mutation
-→ evaluate child
-```
-
-Proposed style:
-
-```
-select parent
-→ expose accumulated failure evidence
-→ generate explicit improvement hypotheses
-→ assign search priors
-→ PUCT selects what the coding agent should try
-→ coding agent implements that hypothesis
-→ verify implementation alignment
-→ evaluate exact child
-→ update causal beliefs and empirical branch value separately
-→ backpropagate downstream evidence
-→ choose next expansion
-```
-
-The proposal therefore turns child generation from **sampling patches** into **persistent, evidence-driven deliberation over possible improvement actions**.
-
-## Optional TD extension
-
-The initial implementation should use empirical MCTS backup.
-
-Only call the method TD-style if values are bootstrapped from successor estimates, e.g.:
-
-$$
-\delta_t=r_t+\gamma V(n_{t+1})-V(n_t)
-$$
-
-$$
-V(n_t)\leftarrow V(n_t)+\alpha\delta_t
-$$
-
-A learned $V(n)$ could eventually estimate the future potential of partially explored harness states, but it should be deferred until there is evidence that such a value estimator is reliable.
-
-## Experimental design
-
-Compare under matched generation/evaluation budgets:
-
-| Method | Description |
+| Record | Minimum contents |
 | --- | --- |
-| Direct mutation baseline | One unconstrained coding-agent mutation per selected parent |
-| Improvement-hypothesis sampling | Generate $K$ structured actions and evaluate each once; no search/backprop |
-| Improvement-hypothesis MCTS | LLM priors + PUCT allocation + empirical backup |
-| MCTS + learned value / TD | Add bootstrapped value estimation for partially explored states |
+| Harness | ID, immutable snapshot/hash, parent, plan and attempt IDs, depth, runtime/model configuration |
+| Plan | Frozen contents, hypothesis, evidence, constraints, expected outcomes, version |
+| Attempt | Parent, plan, implementation configuration, diff, validity, logs, cost |
+| Evaluation | Artifact ID, stage, task/instance IDs, conditions, validator version, outcomes, trajectories, cost |
+| Judge assessment | Artifact/plan IDs, reviewer/rubric version, evidence snapshot IDs, findings and references, uncertainty, partial status, next checks, cost |
+| Policy assessment | Candidate IDs, priors, rationales, evidence/configuration versions |
+| Value assessment | Artifact, F snapshot/fidelity, discount, continuation-policy identity, scalar, uncertainty, rationale |
+| Trial and backup | Ordered path, reward sources, frontier estimate, returns, visits and observed/predicted contributions |
 
-Primary measurements:
+**Proposed engineering safeguards:** validate normalized priors, value bounds, artifact identity, and discount/policy consistency. Cache evaluation by artifact and execution configuration. Persist after each costly operation so interruption does not lose evidence.
 
-- confirmed improvement per valid evaluation,
-- cost/time to first confirmed improvement,
-- regression rate,
-- repeated / redundant improvement directions,
-- task transfer across failures/apps,
-- prior-vs-outcome calibration,
-- hypothesis-to-diff alignment,
-- predicted-mechanism vs observed-mechanism agreement,
-- fraction of search budget spent on productive branches.
+If reevaluation revises a score, do not rewrite historical rewards invisibly. Keep versioned assessment snapshots; choose a declared correction/replay policy rather than appending corrected evidence as an extra search visit.
 
-## Important complications
+## 11. Validation plan and unresolved decisions
 
-- **Generative action space:** the coding agent can invent arbitrarily many improvement hypotheses; progressive widening controls this.
-- **Stochastic implementation:** the same hypothesis can yield different patches; store exact artifacts and treat regenerated implementations as distinct children.
-- **Mechanistic support vs utility:** a predicted mechanism can be correct even when task performance does not improve.
-- **Patch confounding:** bundled edits weaken causal attribution; prefer focused changes when testing a hypothesis.
-- **Noisy evaluation:** matched tasks/seeds and confirmation runs are needed before strong value updates or final claims.
-- **Transpositions:** semantically equivalent improvement hypotheses or near-equivalent patches may appear under different wording or parents.
-- **Adaptive overfitting:** repeatedly using the same development tasks can overfit search; confirmation must remain protected.
-- **Two-level credit assignment:** local hypothesis-search outcomes and global parent-selection outcomes should be recorded separately.
+### Research comparisons
 
-## Working hypothesis
+Compare methods under matched total generation and evaluation cost, including Codex assessment calls. Report the best confirmed existing harness, cost-to-improvement, valid implementation rate, regressions, and performance across task types.
 
-> **Explicitly representing candidate improvement actions and using tree search to allocate coding experiments will improve sample efficiency, credit assignment, and transfer compared with directly sampling unconstrained code mutations.**
-> 
+Priority comparisons are fixed branching m=1, m=2, and configured m=3; widening versus fixed width; bootstrap versus no bootstrap; staged versus fuller evaluation; and adaptive versus fixed continuation length. These are proposed experiments, not evidence of superiority.
 
-The most conservative first implementation is **PUCT-guided improvement-hypothesis search with empirical MCTS backup**, using structured actions $(F,C,M,O)$ and a protected screen/selection/confirmation evaluation protocol.
+Evaluate value predictions against realized discounted reward prefixes plus appropriately discounted continuation tails. Distinguish truncated observations from genuine termination; a finite prefix is not the complete continuing target. Assess ranking usefulness, optimistic bias, subjective uncertainty, and whether adding predictions improves allocation under cost. A change in continuation policy changes the prediction target and should be logged.
+
+### Decisions still required before a complete implementation
+
+| Decision | Why it matters |
+| --- | --- |
+| S0 task membership, stratification and weights | Half-Selection is the proposed fraction; freeze the versioned task manifest, sampled task IDs, and objective weights before execution |
+| Full-Selection triggers and repeats | Controls expenditure and stronger evidence |
+| Validate proposed invalid-patch and infrastructure-failure conventions | Section 8 supplies initial rules; their effect on feasibility allocation and missing outcomes must be tested |
+| c_puct and prior refresh rules | Determines exploration and comparability |
+| Implementation exploration coefficient and widening allocation | Stored-child PUCT is defined; resampling-versus-continuation policies for wider controllers still need specification |
+| Early stopping/terminal convention | Defines value when continuation cannot proceed |
+| Score revision and uncertainty handling | Prevents inconsistent or overconfident Q statistics |
+| Judge resource limits, reviewer model and audit rubric | Per-child parallel diagnostic review is specified in Section 8; calibrate reliability and cost before relying on its findings |
+| Final shortlist and independent test protocol | Determines what final claims are supported |
+| Surrogate versus discovery objective | Tests whether terminal-gain allocation finds the best retained artifacts |
+
+D=8 and three new attempts per trial are initial experimental settings. Their utility, Codex's long-horizon calibration, and the value of deeper continuation require empirical evaluation.
+
+## 12. Reference context
+
+The concrete decisions in this note derive from the project discussion in Implementation Idea.
+
+The following are reading references retained from that note, not claims that the proposed architecture exactly reproduces their algorithms:
+
+- Continuous Upper Confidence Trees: reference for controlling action and stochastic-outcome branching.
+- Wider or Deeper? Scaling LLM Inference-Time Compute with Adaptive Branching Tree Search: reference for adapting generation versus continuation.
+
+The proposed system combines exact-artifact persistence, explicit plan actions, staged task evidence, and bootstrapped utility-change returns. Its empirical value and any methodological novelty must be established through the comparisons above.

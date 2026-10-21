@@ -15,6 +15,10 @@ from alpha_agents.tree_search.core.mcts.contracts import (
     finite,
 )
 from alpha_agents.tree_search.core.mcts.storage import TreeStore
+from alpha_agents.tree_search.infrastructure.evidence_sqlite import (
+    inspection_catalog,
+    prepare_inspection_databases,
+)
 
 
 class TaskIncomplete(RuntimeError):
@@ -193,7 +197,10 @@ class TaskCache:
             if not isinstance(outcome.get("success"), bool) or not outcome.get("task_name"):
                 raise ValueError("Completed outcome needs a normalized boolean and exact template")
             root = Path(outcome["evidence_root"])
-            outcome = {**outcome, "inventory": evidence_inventory(root)}
+            prepare_inspection_databases(root)
+            inventory = evidence_inventory(root)
+            inspection_catalog(root, inventory)
+            outcome = {**outcome, "inventory": inventory}
         with self.store() as store, store.transaction():
             row = store.db.execute("SELECT * FROM task_runs WHERE id=?", (run,)).fetchone()
             if row is None or row["state"] != "running":

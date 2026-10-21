@@ -8,9 +8,9 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-PREDICTION_VERSION = "fixed-puct-discounted-continuing-v4"
+PREDICTION_VERSION = "fixed-puct-discounted-continuing-v6"
 BACKUP_VERSION = "discounted-component-backup-v2"
-ARTIFACT_RUBRIC_VERSION = "artifact-quality-rubric-v2"
+ARTIFACT_RUBRIC_VERSION = "artifact-quality-rubric-v3"
 
 
 def canonical_json(value: Any) -> str:
@@ -51,6 +51,7 @@ class FixedPUCTConfig:
     device_limit: int = 6
     implementor_limit: int = 9
     evaluation_task: str | None = None
+    stop_on_task_success: bool = True
     # Historical storage names; execution uses the generic accessors below.
     codex_invocation_cap: int = 2000
     codex_run_timeout_seconds: int = 7200
@@ -73,12 +74,14 @@ class FixedPUCTConfig:
         return cls(**settings)
 
     def __post_init__(self):
+        if not isinstance(self.stop_on_task_success, bool):
+            raise ValueError("stop_on_task_success must be a boolean")
         if self.evaluation_task is not None and (not isinstance(self.evaluation_task, str) or not self.evaluation_task.strip()):
             raise ValueError("Single-task search requires a nonempty task name")
         if self.screen_gate not in {"strict_all_success", "execution_valid"}:
             raise ValueError("Explicit screen_gate must be strict_all_success or execution_valid")
-        if self.max_plans != 3 or self.max_implementations != 3:
-            raise ValueError("MCTS requires exactly three plans and three implementation slots per plan")
+        if self.max_plans != 3:
+            raise ValueError("MCTS requires exactly three plans per expanded node")
         for name in (
             "max_depth", "max_trials", "max_new_attempts_per_trial", "max_attempts",
             "max_plans", "max_implementations", "trial_workers", "device_limit",
@@ -188,6 +191,12 @@ class Reward:
 
 
 def judge_aggregate(dimensions: Mapping[str, Mapping[str, Any]]) -> tuple[float, tuple[str, ...]]:
+    from alpha_agents.tree_search.core.mcts.judge_review import (
+        CRITERIA,
+        criterion_aggregate,
+    )
+    if set(dimensions) == set(CRITERIA):
+        return criterion_aggregate(dimensions)
     required = {"robustness", "decisions", "generalizable"}
     if set(dimensions) != required:
         raise ValueError("Completed judge review must contain all three harness dimensions")

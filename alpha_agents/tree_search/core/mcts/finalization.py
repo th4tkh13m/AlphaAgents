@@ -193,7 +193,7 @@ class Finalizer:
                   "it is not a device allocation. Timeout bounds and model-review time are separate from expected device hours.", "",
                   "```json", json.dumps(status["runtime_forecasts"], indent=2), "```", "",
                   "## Observed harness-review timing", "",
-                  "Code review overlaps the Screen/S0 phase. Added continuation latency runs from canonical S0 "
+                  "The unified engineering review starts after canonical S0 evidence is available. Added continuation latency runs from canonical S0 "
                   "availability until a valid combined score is ready. Interrupted intervals remain unknown.", "",
                   "```json", json.dumps(status["reviewer_timings"], indent=2), "```", "",
                   "## Targeted engineering checks", "",
@@ -227,7 +227,22 @@ class Finalizer:
                 lines.append(f"| {task['task']} | {task['weight']:.10f} | {task['success']} | {task['contribution']} |")
             lines += ["", f"S0 coverage: `{canonical_json(node['s0_coverage'])}`. "
                       f"Missing source evidence: `{canonical_json(node['missing_sources'])}`.", ""]
-            if node["judge_dimensions"]:
+            if node["judge_dimensions"] and "judge_raw_score" in node:
+                lines += [f"Raw criterion score: `{node['judge_raw_score']}`. Rated criteria: `{node['judge_rated_criteria']}`.", "",
+                          "| Judge dimension | Normalized rating | Rated criteria | Contribution to effective J |",
+                          "| --- | ---: | ---: | ---: |"]
+                for name, dimension in node["judge_dimensions"].items():
+                    lines.append(f"| {name} | {dimension['normalized_score']} | {dimension['rated_count']} | {dimension['aggregate_contribution']:.10f} |")
+                lines += ["", "| Criterion | Assessment | Score (0–4) |", "| --- | --- | ---: |"]
+                for dimension in node["judge_dimensions"].values():
+                    for criterion, rating in dimension["criteria"].items():
+                        lines.append(f"| {criterion} | {rating['assessment']} | {rating['score']} |")
+                lines += ["", f"Unknown criteria: `{canonical_json(node['unknown_criteria'])}`. "
+                          f"Non-applicable criteria: `{canonical_json(node['not_applicable_criteria'])}`. "
+                          "Both are excluded from the rated-criterion denominator; no ratings means unavailable.", "",
+                          "Integrity conclusion (confirmed manipulation forces effective J to zero):", "", "```json",
+                          json.dumps(node["judge_integrity"], indent=2), "```", ""]
+            elif node["judge_dimensions"]:
                 lines += ["| Judge dimension | Rating | Effective rating | Contribution to J | Unknown reason |",
                           "| --- | ---: | ---: | ---: | --- |"]
                 for name, dimension in node["judge_dimensions"].items():

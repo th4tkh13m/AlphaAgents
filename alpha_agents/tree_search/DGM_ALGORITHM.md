@@ -1,6 +1,6 @@
 ﻿# DGM tree search algorithm
 
-This guide explains the algorithm implemented in this repository. The authoritative implementation is [controller.py](core/controller.py), with shared interfaces in [contracts.py](core/contracts.py) and candidate reconstruction in [workspace.py](core/workspace.py).
+This guide explains the algorithm implemented in this repository. The authoritative implementation is [controller.py](core/dgm/controller.py), with shared interfaces in [contracts.py](core/dgm/contracts.py) and candidate reconstruction in [workspace.py](core/dgm/workspace.py).
 
 DGM searches over versions of a harness. Each node is a candidate implementation, and each edge is a code change produced from a parent candidate. The search repeatedly chooses a version, modifies it, evaluates it, and preserves the result so later attempts can build on it.
 

@@ -19,7 +19,7 @@ def test_single_task_thirty_rollouts_reach_depth_eight_without_screen_or_promoti
     (source / 'controller.py').write_text('value = 0\n')
     task = 'OnlyTask'
     config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task=task,
-                             max_trials=30, max_depth=8, max_new_attempts_per_trial=8,
+                             max_trials=30, max_depth=8, max_new_attempts_per_trial=8, stop_on_task_success=False,
                              max_attempts=240, trial_workers=4, device_limit=4)
     evaluator, gateway = Evaluator(), Gateway()
     subset = {'tasks': [{'task': task, 'weight': {'display': 1.0}}], 'coverage': {'selected_tasks': 1}}
@@ -35,7 +35,7 @@ def test_single_task_thirty_rollouts_reach_depth_eight_without_screen_or_promoti
         assert all(stage == 's0' and tasks == (task,) for _, stage, tasks in evaluator.calls)
         assert not search.store.db.execute('SELECT 1 FROM promotions').fetchone()
         assert all(request.execution_mode == 'goal' for request in gateway.calls if request.role == 'implementer')
-        assert all(request.execution_mode == 'plan' for request in gateway.calls if request.role == 'proposer')
+        assert all(request.execution_mode == 'goal' for request in gateway.calls if request.role == 'proposer')
         final = result['final_selection']
         assert final['completed_rollouts'] == 30 and final['winner']['utility'] == 1
         assert final['winner']['f'] == max(c['f'] for c in final['evaluated'])
@@ -218,7 +218,7 @@ def test_sequence_can_use_cached_failed_task_list_without_importing_old_outcomes
     sequence_config = {'cached_root_run': str(tmp_path / 'cached')}
     if reuse is not None:
         sequence_config['reuse_cached_root_results'] = reuse
-    settings = {'sequence': sequence_config, 'controller': {},
+    settings = {'sequence': sequence_config, 'controller': {'screen_gate': 'execution_valid'},
                 'harness': {'source': str(source), 'config': {'androidworld_devices': ['a', 'b', 'c', 'd']}},
                 'evaluation': {'manifest': str(task_manifest)}}
     output = tmp_path / 'sequence'

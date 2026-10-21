@@ -13,7 +13,6 @@ import sqlite3
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
@@ -24,9 +23,9 @@ from alpha_agents.tree_search.core.mcts.assessment_timing import AssessmentTimin
 from alpha_agents.tree_search.core.mcts.contracts import (
     CombinedScore,
     fingerprint,
-    judge_aggregate,
     unit,
 )
+from alpha_agents.tree_search.core.mcts.judge_review import review_score
 from alpha_agents.tree_search.core.mcts.plan_archive import (
     freeze_attempt_evidence,
     freeze_document,
@@ -38,6 +37,11 @@ from alpha_agents.tree_search.core.mcts.ports import (
     StagedEvaluator,
     StageEvidence,
 )
+from alpha_agents.tree_search.core.mcts.resource_retention import (
+    cleanup_sqlite_scratch,
+    retire_workspace,
+    verification_files,
+)
 from alpha_agents.tree_search.core.mcts.responses import (
     canonical_code_evidence,
     canonical_file_evidence,
@@ -45,7 +49,6 @@ from alpha_agents.tree_search.core.mcts.responses import (
 )
 from alpha_agents.tree_search.core.mcts.storage import (
     CapacityError,
-    CatalogChanged,
     OwnershipError,
     TreeStore,
 )
@@ -57,6 +60,7 @@ from alpha_agents.tree_search.core.mcts.value_context import (
     verify_code_views,
 )
 from alpha_agents.tree_search.core.shared.storage import write_json
+from alpha_agents.tree_search.infrastructure.evidence_sqlite import inspection_catalog
 
 JUDGE_COVERAGE_POLICY = "all-s0-outcomes-failed-then-success-id-v2"
 
@@ -79,13 +83,14 @@ def canonical_judge_context(s0: StageEvidence, tasks: tuple[str, ...]) -> dict:
     # This catalog is invocation metadata, not a changed stage snapshot. Exact
     # file paths let consumers enumerate databases, ledgers and images without
     # reconstructing opaque execution IDs from the directory names.
-    catalog = []
+    catalog, inspections = [], []
     file_number = 0
     for reference in dict.fromkeys(evidence):
         root = Path(reference)
         if not root.is_absolute() or not root.is_dir():
             continue  # Symbolic/shared evidence ports need not expose files.
         files = evidence_inventory(root)
+        inspections.extend(inspection_catalog(root, files))
         records = []
         for item in files:
             file_number += 1
@@ -94,7 +99,7 @@ def canonical_judge_context(s0: StageEvidence, tasks: tuple[str, ...]) -> dict:
         catalog.append({"evidence_root_path": reference, "files": records})
     return {"snapshot_id": s0.identity, "outcomes": dict(s0.outcomes),
             "evidence": evidence, "task_review_order": review,
-            "file_catalog": catalog}
+            "file_catalog": catalog, "sqlite_inspection": inspections}
 
 
 class AssessmentPending(RuntimeError):
@@ -139,34 +144,33 @@ class TrialExecutor:
                 "version": "weighted-canonical-combined-v2", "s0_task_weights": self.s0_weights,
                 "judge_weight": self.store.objective.judge_weight,
                 "evaluation_task": self.store.config.evaluation_task}}
-        if role in {"proposer", "policy"}:
+        if role == "policy":
             policy = self.store.continuation_policy()
             context = {**context, "discount_factor": policy["discount_factor"],
                        "continuation_policy_id": fingerprint(policy), "continuation_policy": policy}
         if role == "proposer":
             from alpha_agents.tree_search.core.mcts.planning_scope import (
-                novelty_admission_contract,
                 verification_scope_contract,
             )
-            context = {**context, "verification_scope_contract": verification_scope_contract(),
-                       "novelty_admission_contract": novelty_admission_contract()}
+            context = {**context, "verification_scope_contract": verification_scope_contract()}
         if role == "value":
             from alpha_agents.tree_search.core.mcts.planning_scope import (
-                novelty_admission_contract,
                 verification_scope_contract,
             )
-            context = {**context, "continuation_role_protocol": {
+            from alpha_agents.tree_search.core.mcts.value_forecast import CONTRACT
+            context = {**context, "value_report_contract": dict(CONTRACT), "continuation_role_protocol": {
                 "version": "continuation-role-protocol-v1",
                 "model": self.settings.model, "effort": self.settings.effort,
                 "invocation_deadline_seconds": self.store.config.role_timeout_seconds,
                 "verification_scope_contract": verification_scope_contract(),
-                "novelty_admission_contract": novelty_admission_contract(),
+                "plan_format": "technical-design-v1",
+                "proposal_calls_per_expansion": self.store.config.max_plans,
             }}
         context = self.gateway.enrich_context(role, context)
-        # A separate connection also permits the code-review phase to run in a
-        # background thread while this worker evaluates benchmark tasks.
+        # Isolate role checkpoint/reuse writes from the worker's state connection.
         store = TreeStore(self.store.directory, self.store.config, self.store.objective)
         resources = ExitStack()
+        completed_request_dir = None
         try:
             if not role.startswith("judge_"):
                 self._restore_archive_evidence(context, store)
@@ -175,7 +179,11 @@ class TrialExecutor:
             proposed = self.gateway.prepare_request(str(self.store.directory), "validate-before-launch", role, artifact,
                                    self.settings.model, self.settings.effort, context)
             proposed.render()
-            for invocation in store.db.execute("SELECT id FROM invocations WHERE purpose=? ORDER BY started,id", (purpose,)):
+            # Exhaust the cursor before publishing reuse records. A concurrent
+            # worker may commit while a cached response is inspected; a live WAL
+            # read snapshot cannot then be upgraded to a write transaction.
+            invocations = list(store.db.execute("SELECT id FROM invocations WHERE purpose=? ORDER BY started,id", (purpose,)))
+            for invocation in invocations:
                 prior = self.store.directory / "role_requests" / invocation[0]
                 try:
                     record = json.loads((prior / "request.json").read_text())
@@ -188,11 +196,6 @@ class TrialExecutor:
                         )
                         if manifest(Path(record["workspace"])) != self.artifacts.verify(artifact):
                             continue
-                    if role == "judge_code" and (prior / "failure.json").exists() and not (prior / "response.json").exists():
-                        # The completed diagnostic outage stays unavailable;
-                        # it does not need another call to resume final review.
-                        failure = json.loads((prior / "failure.json").read_text())
-                        raise RuntimeError(failure["error"])
                     response = json.loads((prior / "response.json").read_text())
                     if role != "implementer" and record.get("workspace"):
                         response, _ = canonical_code_evidence(response, Path(record["workspace"]))
@@ -219,10 +222,8 @@ class TrialExecutor:
                     "reservation_owner": request_id, "release": "after-handoff-and-check-drain"})
                 binding = self.gateway.prepare_request(str(self.store.directory), request_id, role, artifact,
                                       self.settings.model, self.settings.effort, context)
-                scope = list(context["allowed_edit_scope"])
                 checks = TargetedChecks(store, self.artifacts, testing_evaluator, workspace, binding,
-                    self.screen_tasks + self.selection_tasks,
-                    lambda parent, child: self._artifact_scope_valid(parent, child, scope))
+                    self.screen_tasks + self.selection_tasks)
                 context = {**context, "device_check_channel": checks.channel}
             request = self.gateway.prepare_request(str(self.store.directory), request_id, role, artifact,
                                   self.settings.model, self.settings.effort, context)
@@ -252,7 +253,11 @@ class TrialExecutor:
                     if mappings:
                         write_json(request_dir / "code_evidence_provenance.json", {
                             "artifact_id": artifact, "workspace": str(workspace), "references": mappings})
+                    from alpha_agents.tree_search.core.mcts.artifacts import manifest
+                    if manifest(workspace) != self.artifacts.verify(artifact):
+                        raise ValueError("Read-only invocation changed its frozen code view")
                 write_json(request_dir / "response.json", result)
+                completed_request_dir = request_dir
                 completion = "response_validated"
                 if role == "policy":
                     result = {**result, "controller_provenance": {
@@ -273,6 +278,8 @@ class TrialExecutor:
         finally:
             try:
                 resources.close()
+                if completed_request_dir is not None and role != "implementer":
+                    cleanup_sqlite_scratch(completed_request_dir)
             finally:
                 store.close()
 
@@ -282,13 +289,14 @@ class TrialExecutor:
         return destination
 
     def _readonly_role(self, owner, purpose, role, artifact, context):
-        workspace = self._workspace(artifact, role)
+        workspace = self.artifacts.readonly_view(artifact, self.store.directory / "value_code_views")
         if role == "value":
             verify_code_views(self.store, self.artifacts, context.get("reachable_code_views", []))
         try:
             result = self._role(owner, purpose, role, artifact, context, workspace)
         finally:
-            if self.artifacts.freeze(workspace) != artifact:
+            from alpha_agents.tree_search.core.mcts.artifacts import manifest
+            if manifest(workspace) != self.artifacts.verify(artifact):
                 raise ValueError(f"Read-only role {role} modified the harness")
             if role == "value":
                 verify_code_views(self.store, self.artifacts, context.get("reachable_code_views", []))
@@ -386,7 +394,11 @@ class TrialExecutor:
         evidence.validate_tasks(tasks)
         if evidence.artifact_id != artifact or evidence.stage != stage:
             raise ValueError("Stage outcome identity mismatch")
+        if self.artifacts.freeze(workspace) != artifact:
+            raise ValueError("Evaluated stage input changed from its frozen artifact")
         self.store.save_evaluation(evidence.identity, artifact, stage, asdict(evidence))
+        retire_workspace(self.store.directory, workspace, self.artifacts, artifact,
+                         self.store.directory / "workspace_retention" / (workspace.name + ".json"))
         return evidence
 
     def _expand(self, node: str, worker: str):
@@ -394,7 +406,8 @@ class TrialExecutor:
         score = self.store.score(node)
         development = self.store.development_evidence(node)
         evidence = fingerprint(development)
-        operation = self.store.claim_operation(node, "expansion", worker, evidence)
+        operation = self.store.claim_operation(node, "expansion", worker, evidence,
+                                               proposal_calls=2 * self.store.config.max_plans)
         if operation is None:
             return
         finished = threading.Event()
@@ -410,69 +423,70 @@ class TrialExecutor:
         success = False
         failure_reason = "Expansion failed; preserved role-request evidence"
         try:
-            context = {"artifact": artifact, "score": asdict(score), "capacity": self.store.capacity(node),
-                       "required_plan_count": 3, "implementation_slots_per_plan": 3,
-                       "plan_archive": self._catalog(), "evidence_snapshot_id": evidence,
+            from alpha_agents.tree_search.core.mcts.design_documents import (
+                FORMAT,
+                SUMMARY_FIELDS,
+            )
+            from alpha_agents.tree_search.core.mcts.implementation_history import (
+                implementation_history,
+            )
+            context = {"artifact": artifact, "score": asdict(score),
+                       "plan_format": FORMAT, "required_plan_count": 1,
+                       "node_depth": self.store._row("nodes", node)["depth"],
+                       "prior_implementations": implementation_history(self.store, node),
+                       "evidence_snapshot_id": evidence,
                        "canonical_evidence": self._node_evidence(node), "development_evidence": development}
-            proposal_tries = policy_tries = 0
-            while proposal_tries < 2:
-                proposal = None
-                while proposal_tries < 2:
-                    proposal_tries += 1
+            plans = []
+            for slot in range(1, self.store.config.max_plans + 1):
+                existing = [{key: plan[key] for key in SUMMARY_FIELDS} for plan in plans]
+                slot_context = {**context, "proposal_slot": slot,
+                                "existing_plans": existing}
+                # Each logical slot gets a separate native Goal invocation. Its
+                # context is stable across recovery, enabling metered reuse.
+                for retry in range(2):
                     try:
-                        proposal = self._readonly_role(operation["request"], "proposal", "proposer", artifact, context)
-                        plans = proposal["plans"]
-                        if not isinstance(plans, list) or len(plans) != self.store.config.max_plans:
-                            raise ValueError("Expansion requires exactly three distinct plans")
-                        if not proposal.get("archive_review"):
-                            raise ValueError("Missing proposal archive review")
+                        proposal = self._readonly_role(operation["request"], "proposal", "proposer", artifact, slot_context)
+                        if len(proposal["plans"]) != 1:
+                            raise ValueError("Each proposer invocation must return exactly one plan")
+                        plan = proposal["plans"][0]
+                        from alpha_agents.tree_search.core.mcts.storage import (
+                            normalize_intervention,
+                        )
+                        action = normalize_intervention(plan["intervention"])
+                        if any(action == normalize_intervention(prior["intervention"]) for prior in plans):
+                            raise ValueError("Proposed intervention duplicates an existing plan at this node")
+                        plans.append({**plan, "candidate_id": plan["id"],
+                                      "id": "plan-" + fingerprint({"node": node, "slot": slot})[:24],
+                                      "proposal_slot": slot,
+                                      "existing_plan_ids": [prior["id"] for prior in plans]})
                         break
                     except (sqlite3.Error, OwnershipError):
                         raise
                     except Exception:
-                        proposal = None
-                if proposal is None:
-                    raise AssessmentPending("Proposal failed twice; expansion remains open for recovery")
-                plans = [{**plan, "candidate_id": plan["id"],
-                          "id": "plan-" + fingerprint({"node": node, "slot": i})[:24]}
-                         for i, plan in enumerate(plans, 1)]
-                raw = {}
-                if plans:
-                    while policy_tries < 2:
-                        policy_tries += 1
-                        try:
-                            policy = self._readonly_role(operation["request"], "policy", "policy", artifact,
-                                                         {**context, "plans": plans})
-                            raw = policy["priors"]
-                            from alpha_agents.tree_search.core.mcts.policy import (
-                                prepare_priors,
-                            )
-                            prepare_priors(raw, self.store.config.prior_floor)
-                            if set(raw) != {plan["id"] for plan in plans}:
-                                raise ValueError("Policy must cover exactly the proposed plans")
-                            break
-                        except (sqlite3.Error, OwnershipError):
-                            raise
-                        except Exception:
-                            raw = {}
-                    if not raw:
-                        raise AssessmentPending("Policy retry allowance exhausted; expansion remains open for recovery")
+                        if retry == 1:
+                            raise AssessmentPending(f"Proposal slot {slot} failed twice; expansion remains open for recovery")
+            policy = None
+            for retry in range(2):
                 try:
-                    self.store.publish_plans(node, worker, operation["token"], plans, raw,
-                                             proposal["archive_review"], proposal.get("zero_reason"),
-                                             policy_response=policy if plans else None,
-                                             required_plan_count=3)
-                except CatalogChanged:
-                    if proposal_tries >= 2 or (plans and policy_tries >= 2):
-                        raise AssessmentPending("Catalog changed; reserved diversity-recheck allowance exhausted") from None
-                    context = {**context, "plan_archive": self._catalog(),
-                               "archive_recheck": {"reason": "New plans were published during this owned expansion",
-                                   "previous_proposal": proposal,
-                                   "instruction": "Inspect the updated archive, compare all previous candidates with the new interventions, "
-                                                  "and revise or retain candidates only with an explicit substantive diversity justification."}}
-                    continue
-                success = True
-                return
+                    policy = self._readonly_role(operation["request"], "policy", "policy", artifact,
+                                                 {**context, "capacity": self.store.capacity(node), "plans": plans})
+                    raw = policy["priors"]
+                    from alpha_agents.tree_search.core.mcts.policy import prepare_priors
+                    prepare_priors(raw, self.store.config.prior_floor)
+                    if set(raw) != {plan["id"] for plan in plans}:
+                        raise ValueError("Policy must cover exactly the proposed plans")
+                    break
+                except (sqlite3.Error, OwnershipError):
+                    raise
+                except Exception:
+                    if retry == 1:
+                        raise AssessmentPending("Policy retry allowance exhausted; expansion remains open for recovery")
+            self.store.publish_plans(node, worker, operation["token"], plans, raw,
+                                     policy_response=policy,
+                                     required_plan_count=self.store.config.max_plans,
+                                     plan_format=FORMAT)
+            success = True
+            return
 
         except Exception as failure:
             failure_reason = f"Expansion failed: {type(failure).__name__}: {failure}"
@@ -547,7 +561,7 @@ class TrialExecutor:
             s0 = self._stage(artifact, "s0", tuple(self.s0_weights))
             if existing["canonical_id"] != s0.identity:
                 raise ValueError("Canonical judge identifies another frozen evaluation")
-            j, _ = judge_aggregate(json.loads(existing["payload"])["dimensions"])
+            j, _ = review_score(json.loads(existing["payload"]))
             u = sum(self.s0_weights[t] * outcome for t, outcome in s0.outcomes.items())
             return CombinedScore(artifact, s0.identity, existing["id"], self.store.objective, u, j)
         timing = AssessmentTiming(self.store, owner, artifact)
@@ -571,50 +585,36 @@ class TrialExecutor:
     def _assess_review(self, owner: str, artifact: str, timing: AssessmentTiming) -> CombinedScore:
         judge_context = {"artifact": artifact, "rubric": self.store.objective.rubric_version,
                          "coverage_policy": JUDGE_COVERAGE_POLICY}
-        def review_code():
-            timing.mark("code_start")
-            try:
-                return self._readonly_role(owner, "judge_code", "judge_code", artifact, judge_context)
-            finally:
-                timing.mark("code_finish")
-        with ThreadPoolExecutor(max_workers=1) as review_pool:
-            code = review_pool.submit(review_code)
-            timing.mark("android_start")
-            try:
-                if self.screen_tasks:
-                    screen = self._stage(artifact, "screen", self.screen_tasks)
-                    if self.store.config.screen_gate == "strict_all_success" and not all(screen.outcomes.values()):
-                        raise ScreenRejected("Strict Screen gate rejected a valid task failure")
-                s0 = self._stage(artifact, "s0", tuple(self.s0_weights))
-                timing.mark("s0_ready")
-            finally:
-                timing.mark("android_finish")
-            try:
-                code_findings = code.result()
-            except (sqlite3.Error, OwnershipError):
-                raise
-            except Exception as error:
-                code_findings = {"status": "unavailable", "error": str(error)}
-        canonical = canonical_judge_context(s0, tuple(self.s0_weights))
-        timing.mark("execution_start")
+        timing.mark("android_start")
         try:
-            final = self._readonly_role(owner, "judge_execution", "judge_execution", artifact,
-                                       {**judge_context, "canonical_evidence": canonical, "code_findings": code_findings})
-            if final.get("status") != "completed" or final.get("phase") != "execution":
+            if self.screen_tasks:
+                screen = self._stage(artifact, "screen", self.screen_tasks)
+                if self.store.config.screen_gate == "strict_all_success" and not all(screen.outcomes.values()):
+                    raise ScreenRejected("Strict Screen gate rejected a valid task failure")
+            s0 = self._stage(artifact, "s0", tuple(self.s0_weights))
+            timing.mark("s0_ready")
+        finally:
+            timing.mark("android_finish")
+        canonical = canonical_judge_context(s0, tuple(self.s0_weights))
+        timing.mark("review_start")
+        try:
+            final = self._readonly_role(owner, "judge_review", "judge_review", artifact,
+                                       {**judge_context, "canonical_evidence": canonical})
+            if final.get("status") != "completed":
                 raise ValueError("Final judge assessment is unavailable")
             if final.get("canonical_evidence_id") != s0.identity or final.get("rubric_version") != self.store.objective.rubric_version:
                 raise ValueError("Final judge evidence/rubric identity mismatch")
-            j, _ = judge_aggregate(final["dimensions"])
+            j, _ = review_score(final)
         except (sqlite3.Error, OwnershipError):
             raise
         except Exception as error:
             raise AssessmentPending("Final judge unavailable; preserve evaluation evidence") from error
         finally:
-            timing.mark("execution_finish")
+            timing.mark("review_finish")
         u = sum(self.s0_weights[task] * outcome for task, outcome in s0.outcomes.items())
         judge_id = self.store.save_judge(artifact, s0.identity, final)
         canonical_judge = json.loads(self.store.db.execute("SELECT payload FROM judge_snapshots WHERE id=?", (judge_id,)).fetchone()[0])
-        j, _ = judge_aggregate(canonical_judge["dimensions"])
+        j, _ = review_score(canonical_judge)
         timing.mark("score_ready")
         return CombinedScore(artifact, s0.identity, judge_id, self.store.objective, u, j)
 
@@ -627,12 +627,13 @@ class TrialExecutor:
         write_json(attempt_dir / "execution.json", {"workspace": str(workspace), "parent_artifact_id": parent,
                                                     "plan_id": plan["id"], "attempt_id": attempt})
         implementation_status = "failed"
+        result = None
         try:
             result = self._role(attempt, "implementation", "implementer", parent,
                                 {"frozen_plan": plan["document"], "plan_id": plan["id"], "attempt_id": attempt,
                                  "parent_score": asdict(self.store.score(selection["parent"])),
-                                 "allowed_edit_scope": json.loads(plan["metadata"])["intervention"]["scope"],
                                  "parent_evidence": self._node_evidence(selection["parent"])}, workspace)
+            self.store.save_implementation_report(attempt, result)
             implementation_status = result.get("status", "failed")
         except (sqlite3.Error, OwnershipError):
             raise
@@ -644,14 +645,6 @@ class TrialExecutor:
         if artifact == parent:
             self.store.fail_attempt(attempt, "Empty patch")
             return
-        violations = self._artifact_scope_violations(
-            parent, artifact, json.loads(plan["metadata"])["intervention"]["scope"])
-        if violations:
-            details = ", ".join(violations[:20])
-            if len(violations) > 20:
-                details += f" (and {len(violations) - 20} more paths)"
-            self.store.fail_attempt(attempt, f"Patch exceeds the frozen intervention edit scope: {details}")
-            return
         child = "node-" + uuid.uuid4().hex
         attempt_dir.mkdir(parents=True, exist_ok=True)
         patch = self.artifacts.binary_patch(parent, artifact)
@@ -660,6 +653,15 @@ class TrialExecutor:
                                                        "parent_artifact_id": parent, "child_id": child,
                                                        "patch_sha256": hashlib.sha256(patch).hexdigest()})
         self.store.register_child(attempt, child, artifact)
+        owned_calls = [self.store.directory / "role_requests" / row[0] for row in self.store.db.execute(
+            "SELECT id FROM invocations WHERE owner=? AND purpose='implementation'", (attempt,))]
+        from alpha_agents.tree_search.core.mcts.recovery import reconcile_process
+        if (implementation_status == "completed" and result is not None
+                and all(reconcile_process(path / "process/process.json", terminate=False) for path in owned_calls)):
+            retire_workspace(self.store.directory, workspace, self.artifacts, artifact,
+                             attempt_dir / "workspace_retention.json", verification_files(workspace, result))
+            for path in owned_calls:
+                cleanup_sqlite_scratch(path)
         try:
             score = self.assess(attempt, artifact)
         except ScreenRejected as error:
@@ -678,22 +680,6 @@ class TrialExecutor:
         if self.on_score:
             self.on_score(child)
         self.store.append_transition(trial, selection["position"])
-
-    def _scope_valid(self, parent, artifact, plan):
-        return self._artifact_scope_valid(parent, artifact, json.loads(plan["metadata"])["intervention"]["scope"])
-
-    def _artifact_scope_valid(self, parent, artifact, scope):
-        return not self._artifact_scope_violations(parent, artifact, scope)
-
-    def _artifact_scope_violations(self, parent, artifact, scope):
-        before = {r["path"]: r for r in self.artifacts.verify(parent)}
-        after = {r["path"]: r for r in self.artifacts.verify(artifact)}
-        changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-        if not isinstance(scope, list):
-            return ["<invalid edit scope>"]
-        return [path for path in changed if not any(
-            allowed == "." or path == allowed or path.startswith(allowed.rstrip("/") + "/") or
-            allowed.startswith(path.rstrip("/") + "/") for allowed in scope)]
 
     def run(self, trial: str) -> dict:
         # A persisted valid prediction survives a crash before backup. Resume
@@ -800,9 +786,6 @@ class TrialExecutor:
                     if frozen["parent_artifact_id"] != parent:
                         raise ValueError("Frozen attempt checkpoint identifies another parent artifact")
                     self.artifacts.verify(frozen["artifact_id"])
-                    plan = self.store._row("plans", selection["plan"])
-                    if not self._scope_valid(parent, frozen["artifact_id"], plan):
-                        raise ValueError("Frozen recovery artifact exceeds its intervention scope")
                     patch = self.artifacts.binary_patch(parent, frozen["artifact_id"])
                     if hashlib.sha256(patch).hexdigest() != frozen["patch_sha256"]:
                         raise ValueError("Frozen attempt patch identity changed")
@@ -823,9 +806,7 @@ class TrialExecutor:
                 artifact = self.store._row("nodes", record["child"])["artifact"]
                 completed_judge = self.store.db.execute("SELECT 1 FROM judge_snapshots WHERE artifact=?", (artifact,)).fetchone()
                 if not completed_judge:
-                    requirements = {"judge_execution": 1}
-                    if not self.store.db.execute("SELECT 1 FROM invocations WHERE owner=? AND purpose='judge_code'", (attempt,)).fetchone():
-                        requirements["judge_code"] = 1
+                    requirements = {"judge_review": 1}
                     self.store.reserve_recovery(attempt, requirements, "Operator resume: frozen artifact assessment")
                 try:
                     score = self.assess(attempt, artifact)

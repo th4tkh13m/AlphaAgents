@@ -35,7 +35,7 @@ flowchart LR
    This is guaranteed access with bounded task-boundary wait, not instant access.
 4. At handoff, drain admitted checks and release the reservation even on error.
    Freeze the candidate, run Screen, then S0, then trajectory judging, and publish
-   its score. Code review overlaps Android evaluation. The implementor admission
+   its score. One integrated engineering review follows canonical S0 evidence collection. The implementor admission
    slot is free for another Codex invocation while this candidate is evaluated;
    the consumed plan/implementation slot remains part of the permanent tree.
 5. Continue the trial or evaluate its frontier value, then transact exactly one
@@ -79,7 +79,7 @@ subprocesses have been reconciled under the coordinator run lock.
 
 ### Trial-local outages
 
-An unavailable Android evaluation, execution judge, or twice-failed value call
+An unavailable Android evaluation, unified judge, or twice-failed value call
 parks only its trial (`awaiting_evaluation`, `awaiting_judge`, or `awaiting_value`).
 The coordinator records these errors with `scope: trial`, frees the worker, and
 admits replacement trials within the original trial and invocation caps. Peers
@@ -115,3 +115,51 @@ Do not replace a live run's frozen source/configuration. Validate the new protoc
 in a separate run under `runs/`, preserving old evidence and historical figures.
 Report live device occupancy, queued runnable work, testing reservations, waiting
 implementors, and stage times separately from the configured pool size.
+
+## Sequential single-task experiment
+
+Select `controller.type = task_sequence` and provide `sequence.cached_root_run`.
+The preparation step freezes all trusted canonical root failures observed in that
+source run, sorted by task name. It reports the measured task list too; unmeasured
+or infrastructure-invalid tasks are not invented as failures. Confirmation tasks
+are excluded. The configured source must exactly match the cached root artifact.
+
+The sequence uses four fresh emulators and an independent tree per task. Each tree
+has three plans per expanded harness and a configured one to three implementation
+slots per plan, filled through MCTS selection. Sequence construction honors the
+configured depth, rollout and attempt limits. The 3x2/depth-4 setup permits four
+new implementations per rollout, 30 rollouts, and at most 120 attempts. The
+ordinary multi-task defaults remain three attempts per rollout and 90 total.
+
+`evaluation_task` freezes the one task into the tree's objective. Screen is absent;
+canonical S0 contains exactly this task with weight one. The unified judge still
+scores the harness independently, so F retains the configured mixture of binary
+task success and J. There is no background promotion or separate full-Selection
+execution. A missing trusted task result parks the trial rather than scoring zero.
+
+By default, stop new admission when canonical task success has a completed
+effective judge score at least the original task-tree root J, excluding confirmed
+manipulation. Drain admitted work and its exactly-once backups, then select the
+highest observed F among qualifying harnesses. Without a qualifying success,
+finish the configured rollouts and select the highest observed F across the
+eligible stored tree, including root and intermediate nodes. Ties prefer lower
+depth, then artifact ID. Set `stop_on_task_success=false` for a full-budget
+comparison run. Record the stopping receipt, actual rollout count, and winner
+artifact's
+actual ancestor plan/implementation path and export the exact immutable harness.
+Returns and predicted values guide allocation but are not the final selection
+score. An unfinished trial or exhausted request budget prevents advancing to the
+next task; the sequence records `recovery_pending` for explicit resume.
+
+The next tree starts from the exported harness, with a separate task objective,
+visit statistics, plan archive, and judge assessment. Existing canonical root task
+receipts are imported only for the exact unchanged artifact and matching execution
+contract, with audited evaluator compatibility and retained evidence hashes.
+Changed carried harnesses require their own baseline measurement on the next task.
+A selected task's prior measurements do not become another task's score.
+
+The sequence checkpoints `sequence.json`, writes `MONITOR.md` on transitions, and
+automatically refreshes `LIVE_MONITOR.md` and `INCIDENTS.md` during execution. Each
+task retains its own automatically updated Perfetto trace in `profiling/`.
+Sequential optimization does not establish retention on previous tasks; only the
+current task is measured. Previously passing tasks and Confirmation are not run.

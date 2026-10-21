@@ -17,7 +17,7 @@ from typing import Any
 
 from alpha_agents.tree_search.core.mcts.contracts import canonical_json, fingerprint
 
-PROMPT_VERSION = "fixed-puct-role-prompts-v22"
+PROMPT_VERSION = "fixed-puct-role-prompts-v34"
 
 PROMPT_DIRECTORY = Path(__file__).with_name("prompts")
 
@@ -34,15 +34,13 @@ POLICY = _load_prompt("policy.md")
 
 IMPLEMENTER = _load_prompt("implementer.md")
 
-JUDGE_COMMON = _load_prompt("judge_common.md")
-
-JUDGE_CODE = JUDGE_COMMON + _load_prompt("judge_code.md")
-
-JUDGE_EXECUTION = JUDGE_COMMON + _load_prompt("judge_execution.md")
+JUDGE_REVIEW = _load_prompt("judge.md")
 
 VALUE = _load_prompt("value.md")
+VALUE_FORECAST = VALUE  # Compatibility name for the formerly staged prompt.
 
-GOAL_OBJECTIVE_TEMPLATE = _load_prompt("goal_objective.md")
+IMPLEMENTER_GOAL_OBJECTIVE_TEMPLATE = _load_prompt("implementer_goal_objective.md")
+PROPOSER_GOAL_OBJECTIVE_TEMPLATE = _load_prompt("proposer_goal_objective.md")
 CONTEXT_GUIDANCE = json.loads(_load_prompt("context_guidance.json"))
 SINGLE_TASK = _load_prompt("single_task.md")
 
@@ -54,7 +52,10 @@ def _decorate_context(role: str, supplied: dict) -> dict:
         if name in context:
             context[name] = {**context[name], **guidance[name]}
     if not role.startswith("judge_"):
-        context["utility_context"] = {**context.get("utility_context", {}), **guidance["utility_context"]}
+        utility = guidance["utility_context"]
+        if role in {"proposer", "implementer"}:
+            utility = {**utility, "definition": "U is the frozen weighted canonical task outcome utility; J is independently judged harness quality. F=(1-judge_weight)*U+judge_weight*J. Improve task completion through the assigned role. The controller owns search allocation and statistical updates."}
+        context["utility_context"] = {**context.get("utility_context", {}), **utility}
         context["trajectory_interpretation_contract"] = {
             **guidance["trajectory_interpretation_contract"],
             "sqlite": guidance["judge_reference_contract"]["sqlite"],
@@ -64,7 +65,7 @@ def _decorate_context(role: str, supplied: dict) -> dict:
             f"context:{key}" for key, value in sorted(supplied.items())
             if key.endswith("_id") and isinstance(value, str) and value]
         context["evidence_reference_contract"] = references
-    if role == "judge_execution" and "snapshot_id" in context.get("canonical_evidence", {}):
+    if role == "judge_review" and "snapshot_id" in context.get("canonical_evidence", {}):
         canonical = context["canonical_evidence"]
         context["canonical_evidence"] = {**canonical,
             "canonical_evidence_id": canonical["snapshot_id"],
@@ -78,7 +79,7 @@ def _decorate_context(role: str, supplied: dict) -> dict:
 
 
 TEMPLATES = {"proposer": PROPOSER, "policy": POLICY, "implementer": IMPLEMENTER,
-             "judge_code": JUDGE_CODE, "judge_execution": JUDGE_EXECUTION, "value": VALUE}
+             "judge_review": JUDGE_REVIEW, "value": VALUE}
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,7 @@ class RoleRequest:
             raise ValueError("Unsupported role prompt version")
         canonical_json(self.context)
         if self.role.startswith("judge_"):
-            allowed = {"artifact", "canonical_evidence", "rubric", "code_findings", "coverage_policy"}
+            allowed = {"artifact", "canonical_evidence", "rubric", "coverage_policy"}
             if set(self.context) - allowed:
                 raise ValueError("Judge context must be artifact-only canonical scoring evidence")
             def inspect(value):
@@ -127,11 +128,11 @@ class RoleRequest:
 
     @property
     def collaboration_mode(self) -> str:
-        return "plan" if self.role == "proposer" else "default"
+        return "default"
 
     @property
     def execution_mode(self) -> str:
-        return "goal" if self.role == "implementer" else "plan" if self.role == "proposer" else "turn"
+        return "goal" if self.role in {"proposer", "implementer"} else "turn"
 
     def render(self) -> str:
         envelope = {**asdict(self), "permission_mode": self.permission_mode,
@@ -140,7 +141,15 @@ class RoleRequest:
         single = self.context.get("utility_context", {}).get("evaluation_task") or (
             len(self.context.get("canonical_evidence", {}).get("outcomes", {})) == 1)
         protocol = "\n\n" + SINGLE_TASK.strip() if single else ""
-        return SHARED.strip() + "\n\n" + TEMPLATES[self.role].strip() + protocol + "\n\n## Exact invocation inputs\n```json\n" + canonical_json(envelope) + "\n```\n"
+        existing = ""
+        if self.role == "proposer" and self.context.get("existing_plans"):
+            existing = ("\n\n## Existing plans for this invocation\n"
+                        "There are already proposed plans at this exact parent. Read every summary "
+                        "in existing_plans in the invocation inputs below. Your intervention must not "
+                        "overlap those plans in executable behavior. Explain the concrete differences "
+                        "in Proposed design, referring to their supplied IDs. These are proposals, "
+                        "not prior implementations.\n")
+        return SHARED.strip() + "\n\n" + TEMPLATES[self.role].strip() + protocol + existing + "\n\n## Exact invocation inputs\n```json\n" + canonical_json(envelope) + "\n```\n"
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -156,5 +165,6 @@ class RoleRequest:
     @property
     def library_hash(self) -> str:
         return fingerprint({"version": PROMPT_VERSION, "shared": SHARED, "templates": TEMPLATES,
-                            "goal_objective": GOAL_OBJECTIVE_TEMPLATE, "context_guidance": CONTEXT_GUIDANCE,
+                            "implementer_goal_objective": IMPLEMENTER_GOAL_OBJECTIVE_TEMPLATE,
+                            "proposer_goal_objective": PROPOSER_GOAL_OBJECTIVE_TEMPLATE, "context_guidance": CONTEXT_GUIDANCE,
                             "plan_repair": PLAN_REPAIR_TEMPLATE, "single_task": SINGLE_TASK})
