@@ -35,16 +35,22 @@ def finalize_single_task(finalizer):
             for node in store.db.execute("SELECT * FROM nodes WHERE eligible=1 ORDER BY depth,id"):
                 score = store.score(node["id"])
                 row = store.db.execute("SELECT payload FROM evaluation_snapshots WHERE id=?", (score.u_snapshot_id,)).fetchone()
-                if row is None or score.u not in {0, 1}:
-                    raise ValueError("Single-task score requires its canonical binary observation")
+                if row is None:
+                    raise ValueError("Single-task score requires its canonical observation")
                 evidence = json.loads(row["payload"])
-                if evidence["artifact_id"] != score.artifact_id or evidence["outcomes"] != {task: bool(score.u)}:
-                    raise ValueError("Single-task score must match its canonical binary task outcome")
+                stage = StageEvidence(evidence["artifact_id"], evidence["stage"], evidence["outcomes"],
+                                      tuple(evidence["evidence"]), evidence.get("samples"))
+                stage.validate_tasks((task,))
+                stage.validate_repetitions(store.config.evaluation_repetitions)
+                if stage.artifact_id != score.artifact_id or stage.rates[task] != score.u:
+                    raise ValueError("Single-task score must match its empirical pass fraction")
                 evaluated.append({"node": node["id"], "artifact_id": score.artifact_id,
                                   "depth": node["depth"], "u": score.u, "utility": score.u,
                                   "j": score.j, "f": score.f, "score": asdict(score),
                                   "snapshot_id": score.u_snapshot_id, "outcomes": evidence["outcomes"],
-                                  "evidence": evidence["evidence"]})
+                                  "evidence": evidence["evidence"], "samples": evidence.get("samples"),
+                                  "passes": sum(stage.samples[task]) if stage.samples else int(stage.outcomes[task]),
+                                  "evaluations": len(stage.samples[task]) if stage.samples else 1})
             candidates = [item for item in evaluated if qualifying_success(store, item["node"])] if success else evaluated
             winner = min(candidates, key=lambda item: (-item["f"], item["depth"], item["artifact_id"], item["node"]))
             actions, node = [], store._row("nodes", winner["node"])
@@ -67,7 +73,7 @@ def finalize_single_task(finalizer):
     winner = payload["winner"]
     if payload.get("success_stop") and not qualifying_success(store, winner["node"]):
         raise ValueError("Frozen early-stop winner no longer satisfies the success rule")
-    evidence = StageEvidence(winner["artifact_id"], "s0", winner["outcomes"], tuple(winner["evidence"]))
+    evidence = StageEvidence(winner["artifact_id"], "s0", winner["outcomes"], tuple(winner["evidence"]), winner.get("samples"))
     evidence.validate_tasks((task,))
     finalizer.evaluator.verify_stage(evidence)
     if not prior:
@@ -78,14 +84,16 @@ def finalize_single_task(finalizer):
     write_json(store.directory / "final_selection.json", payload)
     write_json(store.directory / "status.json", store.status())
     lines = ["# Single-task MCTS result", "", f"Task: `{task}`. Completed rollouts: {payload['completed_rollouts']}.", "",
-             ("Stop on canonical success with J >= original root J, excluding confirmed manipulation; select among qualifying harnesses."
+             ("Stop after all required fresh repetitions pass and child J > original root J, excluding confirmed manipulation; select among qualifying harnesses."
               if payload.get("success_stop") else "Select the highest observed F = (1 − judge weight) × task success + judge weight × J,"),
              "including intermediate nodes and the root. Equal F prefers lower depth, then artifact ID.",
              "PUCT returns guide allocation; they are not the harness selection score.", "",
              f"Winner: `{payload['winner']['artifact_id']}`.", "",
              "No separate Screen, full-Selection, or Confirmation evaluation was run.",
-             "This measures one development task, not generalization or retention of earlier tasks.", "",
-             "| Node | Depth | Task success U | Judge J | Combined F |", "| --- | ---: | ---: | ---: | ---: |"]
-    lines += [f"| `{c['node']}` | {c['depth']} | {c['u']:.0f} | {c['j']:.4f} | {c['f']:.4f} |" for c in payload["evaluated"]]
+             "This measures one development task, not generalization or retention of earlier tasks.",
+             "Node repetitions run sequentially and stop at the first measured failure. U uses only actual executions; unrun repetitions are not votes.",
+             "The adaptively stopped pass fraction is not an unbiased reliability estimate.", "",
+             "| Node | Depth | Passes / evaluations | Empirical U | Judge J | Combined F |", "| --- | ---: | ---: | ---: | ---: | ---: |"]
+    lines += [f"| `{c['node']}` | {c['depth']} | {c['passes']}/{c['evaluations']} | {c['u']:.3f} | {c['j']:.4f} | {c['f']:.4f} |" for c in payload["evaluated"]]
     (store.directory / "FINAL_REPORT.md").write_text("\n".join(lines) + "\n")
     return payload

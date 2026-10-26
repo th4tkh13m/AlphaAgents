@@ -52,6 +52,7 @@ class FixedPUCTConfig:
     implementor_limit: int = 9
     evaluation_task: str | None = None
     stop_on_task_success: bool = True
+    evaluation_repetitions: int = 3
     # Historical storage names; execution uses the generic accessors below.
     codex_invocation_cap: int = 2000
     codex_run_timeout_seconds: int = 7200
@@ -74,6 +75,9 @@ class FixedPUCTConfig:
         return cls(**settings)
 
     def __post_init__(self):
+        if (isinstance(self.evaluation_repetitions, bool) or not isinstance(self.evaluation_repetitions, int)
+                or not 1 <= self.evaluation_repetitions <= 3):
+            raise ValueError("evaluation_repetitions must be an integer in [1, 3]")
         if not isinstance(self.stop_on_task_success, bool):
             raise ValueError("stop_on_task_success must be a boolean")
         if self.evaluation_task is not None and (not isinstance(self.evaluation_task, str) or not self.evaluation_task.strip()):

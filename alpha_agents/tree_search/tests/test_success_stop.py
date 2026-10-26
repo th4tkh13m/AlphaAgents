@@ -21,7 +21,7 @@ from alpha_agents.tree_search.tests.test_mcts_coordinator import Evaluator, Gate
 class RatedGateway(Gateway):
     def __init__(self, ratings=None, barrier=None, manipulated=(), child_ratings=()):
         super().__init__()
-        self.ratings = ratings or {}
+        self.ratings = {0: 2, **(ratings or {})}
         self.barrier = barrier
         self.manipulated = manipulated
         self.child_ratings = iter(child_ratings)
@@ -53,7 +53,7 @@ def search_fixture(tmp_path, *, value=0, gateway=None, evaluator=None, **setting
     source = tmp_path / 'source'
     source.mkdir()
     (source / 'controller.py').write_text(f'value = {value}\n')
-    config = FixedPUCTConfig(**{'screen_gate': 'execution_valid', 'evaluation_task': 'Task',
+    config = FixedPUCTConfig(**{'screen_gate': 'execution_valid', 'evaluation_task': 'Task', 'evaluation_repetitions': 1,
         'max_trials': 3, 'trial_workers': 1, 'max_new_attempts_per_trial': 1, **settings})
     return FixedPUCTCoordinator(source, tmp_path / 'tree', config, Objective('single', 'rubric', 'judge'),
         gateway or RatedGateway(), evaluator or Evaluator(), RoleSettings('model', 'low'),
@@ -61,7 +61,7 @@ def search_fixture(tmp_path, *, value=0, gateway=None, evaluator=None, **setting
 
 
 @pytest.mark.parametrize('child_rating', [3, 4])
-def test_success_at_or_above_original_root_judge_stops_and_reuses_finalization(tmp_path, child_rating):
+def test_success_above_original_root_judge_stops_and_reuses_finalization(tmp_path, child_rating):
     gateway = RatedGateway({1: child_rating})
     search = search_fixture(tmp_path, gateway=gateway)
     try:
@@ -105,7 +105,7 @@ def test_successful_root_stops_without_any_search_trials(tmp_path):
 def test_benchmark_pass_with_lower_judge_keeps_searching_until_qualified(tmp_path):
     # The second attempt improves on a lower-quality successful parent but is
     # still below the ORIGINAL root; neither may stop the search.
-    gateway = RatedGateway(child_ratings=(1, 2, 3))
+    gateway = RatedGateway({0: 3}, child_ratings=(1, 2, 4))
     search = search_fixture(tmp_path, gateway=gateway)
     try:
         result = search.run()
@@ -113,7 +113,7 @@ def test_benchmark_pass_with_lower_judge_keeps_searching_until_qualified(tmp_pat
         final = result['final_selection']
         assert gateway.implementations == 3
         assert len([call for call in gateway.calls if call.role == 'value']) == 2
-        assert final['winner']['j'] == .75
+        assert final['winner']['j'] == 1
         assert final['success_stop']['root_score']['j'] == .75
         assert final['completed_rollouts'] == 3
     finally:
@@ -282,7 +282,7 @@ def test_sequence_hands_early_winner_to_next_task_and_measures_new_root(tmp_path
     (source / 'controller.py').write_text('value = 0\n')
     searches = []
     def factory(task, index, parent, directory):
-        config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task=task,
+        config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task=task, evaluation_repetitions=1,
             max_trials=3, trial_workers=1, max_new_attempts_per_trial=1)
         search = FixedPUCTCoordinator(parent, directory, config, Objective(task, 'rubric', 'judge'),
             RatedGateway(), Evaluator(), RoleSettings('model', 'low'), (), {task: 1.0}, (task,), {})

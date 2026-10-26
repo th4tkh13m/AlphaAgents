@@ -216,13 +216,20 @@ def score_breakdowns(store, subset: dict) -> list[dict]:
         else:
             observed = store.db.execute("SELECT payload FROM evaluation_snapshots WHERE artifact=? AND stage='s0' ORDER BY rowid LIMIT 1", (node["artifact"],)).fetchone()
             judged = None
-        outcomes = json.loads(observed[0]).get("outcomes", {}) if observed else {}
+        observation = json.loads(observed[0]) if observed else {}
+        outcomes = observation.get("outcomes", {})
+        samples = observation.get("samples") or {}
         if not observed:
             item["missing_sources"].append("canonical_s0_outcomes")
         for task, weight in sorted(weights.items()):
             success = outcomes.get(task)
-            item["weighted_tasks"].append({"task": task, "weight": weight, "success": success,
-                                           "contribution": weight * success if isinstance(success, bool) else None})
+            rate = sum(samples[task]) / len(samples[task]) if task in samples else success
+            contribution = {"task": task, "weight": weight, "success": success,
+                            "contribution": weight * rate if isinstance(rate, (bool, int, float)) else None}
+            if task in samples:
+                contribution.update(samples=samples[task], pass_rate=rate,
+                                    passes=sum(samples[task]), evaluations=len(samples[task]))
+            item["weighted_tasks"].append(contribution)
         item["s0_coverage"] = {"completed": sum(isinstance(outcomes.get(task), bool) for task in weights),
                                 "required": len(weights)}
         if score and weights and item["s0_coverage"]["completed"] == len(weights):

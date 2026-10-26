@@ -133,13 +133,18 @@ ordinary multi-task defaults remain three attempts per rollout and 90 total.
 
 `evaluation_task` freezes the one task into the tree's objective. Screen is absent;
 canonical S0 contains exactly this task with weight one. The unified judge still
-scores the harness independently, so F retains the configured mixture of binary
-task success and J. There is no background promotion or separate full-Selection
+scores the harness independently, so F retains the configured mixture of empirical
+task full-pass fraction and J. There is no background promotion or separate full-Selection
 execution. A missing trusted task result parks the trial rather than scoring zero.
 
-By default, stop new admission when canonical task success has a completed
-effective judge score at least the original task-tree root J, excluding confirmed
-manipulation. Drain admitted work and its exactly-once backups, then select the
+By default, evaluate up to three fresh canonical repetitions sequentially,
+stopping node evaluation at its first measured failure. Register later jobs only
+after earlier passes; on resume, retain the observed prefix and never continue
+after its failure. Infrastructure errors follow their existing bounded recovery
+policy and do not count as failed votes. Report actual counts. Stop new admission
+only after 3/3 passes with a completed child judge score strictly above the
+original task-tree root J, excluding confirmed manipulation. Passing roots use
+the same 3/3 requirement with a usable review. Drain admitted work and its exactly-once backups, then select the
 highest observed F among qualifying harnesses. Without a qualifying success,
 finish the configured rollouts and select the highest observed F across the
 eligible stored tree, including root and intermediate nodes. Ties prefer lower

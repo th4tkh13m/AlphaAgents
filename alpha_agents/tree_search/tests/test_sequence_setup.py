@@ -12,6 +12,7 @@ from alpha_agents.tree_search.core.mcts.contracts import FixedPUCTConfig, Object
 from alpha_agents.tree_search.core.mcts.coordinator import FixedPUCTCoordinator
 from alpha_agents.tree_search.core.mcts.ports import RoleSettings, StageEvidence
 from alpha_agents.tree_search.tests.test_mcts_coordinator import Evaluator, Gateway
+from alpha_agents.tree_search.tests.test_success_stop import RatedGateway
 
 
 def settings(tmp_path, rows=None):
@@ -30,7 +31,7 @@ def settings(tmp_path, rows=None):
     manifest.write_text(json.dumps({'rows': rows}))
     return {'controller': {'type': 'task_sequence', 'screen_gate': 'execution_valid',
                 'max_depth': 4, 'max_plans': 3, 'max_implementations': 2,
-                'max_trials': 30, 'trial_workers': 4},
+                'max_trials': 30, 'trial_workers': 4, 'evaluation_repetitions': 1},
             'harness': {'source': str(source), 'config': {'androidworld_devices': ['a', 'b', 'c', 'd']}},
             'evaluation': {'manifest': str(manifest)},
             'sequence': {'task_scope': 'all_development', 'order': 'difficulty_then_human_steps',
@@ -115,7 +116,7 @@ def test_actual_twenty_five_task_manifest_is_ordered_and_handed_forward(tmp_path
                 return StageEvidence(artifact, stage, {task: value >= position // 5 + 1}, (f'trace:{artifact}',))
         search = FixedPUCTCoordinator(Path(current['harness']['source']), directory,
             FixedPUCTConfig.from_mapping({key: value for key, value in current['controller'].items() if key != 'type'}),
-            Objective(task, 'rubric', 'judge'), Gateway(), TaskEvaluator(), RoleSettings('model', 'low'),
+            Objective(task, 'rubric', 'judge'), RatedGateway({v: 1 if v < position // 5 + 1 else 3 for v in range(10)}), TaskEvaluator(), RoleSettings('model', 'low'),
             (), {task: 1.0}, (task,), {})
         applications.append(search)
         return search
@@ -144,7 +145,7 @@ def test_actual_twenty_five_task_manifest_is_ordered_and_handed_forward(tmp_path
 def test_two_implementation_slots_are_enforced_by_actual_tree(tmp_path):
     config = settings(tmp_path)
     search = FixedPUCTCoordinator(Path(config['harness']['source']), tmp_path / 'tree',
-        FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', max_plans=3,
+        FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', evaluation_repetitions=1, max_plans=3,
             max_implementations=2, max_depth=4, max_trials=8, max_new_attempts_per_trial=4,
             max_attempts=32, trial_workers=1, stop_on_task_success=False),
         Objective('task', 'rubric', 'judge'), Gateway(), Evaluator(), RoleSettings('model', 'low'),

@@ -81,7 +81,7 @@ class TaskSequence:
         write_json(self.directory / "sequence.json", state)
         lines = ["# Sequential single-task MCTS monitor", "",
                  f"State: **{state['state']}**. Frozen tasks: **{len(self.tasks)}**.", "",
-                 "Each task stops on canonical success with J >= its original root J and no confirmed manipulation, or at configured search limits.",
+                 "Each node runs canonical repetitions sequentially until its first measured failure or all required passes. A child stops task search only after all required passes with J > its original root J and no confirmed manipulation; otherwise configured search limits apply.",
                  "Each tree evaluates only its named task. The selected exact harness becomes the next root.",
                  "Earlier-task retention and generalization are not measured by this experiment.", "",
                  "| Task | State | Tree directory | Winner |", "| --- | --- | --- | --- |"]

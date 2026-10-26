@@ -7,7 +7,7 @@ from .contracts import canonical_json, fingerprint
 from .judge_review import review_score
 from .ports import StageEvidence
 
-VERSION = "single-task-success-root-judge-v1"
+VERSION = "single-task-repeated-success-strict-root-judge-v2"
 
 
 def enabled(store):
@@ -28,7 +28,8 @@ def qualifying_success(store, node, *, respect_policy=True):
     if root is None or not candidate["eligible"] or candidate["score"] is None:
         return None
     score, baseline = store.score(node), store.score(root[0])
-    if score.u != 1 or score.j < baseline.j:
+    is_root = node == root[0]
+    if score.u != 1 or (not is_root and score.j <= baseline.j):
         return None
     for current, is_candidate in ((baseline, False), (score, True)):
         record = store.db.execute("SELECT payload FROM judge_snapshots WHERE id=?", (current.j_snapshot_id,)).fetchone()
@@ -55,8 +56,12 @@ def qualifying_success(store, node, *, respect_policy=True):
         return None
     data = json.loads(record[0])
     try:
-        evidence = StageEvidence(data["artifact_id"], data["stage"], data["outcomes"], tuple(data["evidence"]))
+        evidence = StageEvidence(data["artifact_id"], data["stage"], data["outcomes"], tuple(data["evidence"]), data.get("samples"))
     except (ValueError, KeyError, TypeError):
+        return None
+    try:
+        evidence.validate_repetitions(store.config.evaluation_repetitions)
+    except ValueError:
         return None
     if (evidence.identity != score.u_snapshot_id or evidence.artifact_id != score.artifact_id
             or evidence.stage != "s0" or evidence.outcomes != {store.config.evaluation_task: True}):
@@ -64,7 +69,9 @@ def qualifying_success(store, node, *, respect_policy=True):
     return {"version": VERSION, "task": store.config.evaluation_task, "node": node,
             "artifact_id": score.artifact_id, "score": asdict(score),
             "root_node": root[0], "root_score": asdict(baseline),
-            "rule": "canonical U=1 and effective J>=original root J; no confirmed manipulation"}
+            "evaluation_repetitions": store.config.evaluation_repetitions,
+            "passes": store.config.evaluation_repetitions,
+            "rule": "all canonical repetitions pass; child effective J>original root J; root skip uses its own usable review; no confirmed manipulation"}
 
 
 def record_success(store, node):

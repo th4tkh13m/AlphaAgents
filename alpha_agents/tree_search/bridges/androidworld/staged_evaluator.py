@@ -132,6 +132,9 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         if not Path(self.config["androidworld_root"]).is_dir():
             raise ValueError("Configured AndroidWorld source root is missing")
         env = os.environ.copy()
+        # Importing Artemis initializes trace directories. Preflight must not
+        # write those into the immutable incoming harness (or an inherited run).
+        env["ARTEMIS_TRACES_DIR"] = str((self.cache.directory / "preflight_runtime").resolve())
         roots = [self.config["androidworld_root"]]
         if source:
             roots.append(str(source))
@@ -174,7 +177,14 @@ class StagedArtemisEvaluator(EvaluationAdapter):
             return verify_androidworld(Path(self.config["androidworld_root"]), expected)
         return None
 
-    def _identity(self, artifact, task, stage=None):
+    def _repetitions(self, stage):
+        return self.cache.config.evaluation_repetitions if self.cache.config.evaluation_task and stage != "targeted" else 1
+
+    def _identities(self, artifact, tasks, stage):
+        return tuple(self._identity(artifact, task, stage, repetition) for task in tasks
+                     for repetition in range(self._repetitions(stage)))
+
+    def _identity(self, artifact, task, stage=None, repetition=0):
         # Scheduling/stage/output/device coordinates do not change the paired
         # instance. Every behavior-affecting runner option remains in identity.
         excluded = {"androidworld_device_ports", "androidworld_assigned_device", "console_port", "grpc_port", "task_file",
@@ -184,7 +194,7 @@ class StagedArtemisEvaluator(EvaluationAdapter):
                             self.revision.evaluator, self.revision.fixture, runner,
                             {"startup": 120, "task": 1800, "cleanup": 180, "outer": 2100,
                              "llm": self.config["llm_timeout"]},
-                            sample_kind="targeted" if stage == "targeted" else "canonical")
+                            sample_kind="targeted" if stage == "targeted" else "canonical", repetition=repetition)
 
     def _check_tasks(self, stage, tasks):
         if stage not in {"screen", "s0", "selection", "targeted"}:
@@ -195,14 +205,16 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         if not tasks or len(tasks) != len(set(tasks)) or not set(tasks) <= allowed:
             raise ValueError("Task stage contains duplicate, unknown, or protected instances")
 
-    def prepare(self, artifact, stages):
-        """Register mandatory jobs and retry policy before code review/evaluation."""
+    def prepare(self, artifact, stages, *, repetition=0):
+        """Register only admitted jobs; later repetitions depend on earlier passes."""
         self.artifacts.verify(artifact)
         self._verify_runtime_source()
         batches = {}
         for stage, tasks in stages.items():
             self._check_tasks(stage, tasks)
-            identities = tuple(self._identity(artifact, task, stage) for task in tasks)
+            identities = self._identities(artifact, tasks, stage)
+            if self._repetitions(stage) > 1:
+                identities = tuple(identity for identity in identities if identity.repetition == repetition)
             batch = self.cache.register(self.owner, artifact, stage, identities)
             batches[stage] = batch
             for identity in identities:
@@ -238,6 +250,24 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    def _success(self, episode):
+        if self.cache.config.evaluation_task:
+            reward = episode.get("androidworld_reward")
+            if reward is None:
+                # The trusted normalizer can certify a bounded agent failure
+                # (e.g. recursion exhaustion) without a grading call. It is an
+                # observed non-completion, not an infrastructure retry or pass.
+                if episode.get("outcome_status") == "completed" and episode.get("success") is False:
+                    return False
+                from .task_outcomes import is_bounded_agent_failure
+
+                if (episode.get("success") is False and episode.get("score") == 0
+                        and is_bounded_agent_failure({**episode, "success": episode["score"]})):
+                    return False
+                raise TaskIncomplete("Repeated evaluation lacks a trusted task outcome")
+            return finite(reward, "AndroidWorld reward") == 1
+        return episode["success"]
+
     def _attempt(self, identity, stage, device):
         source_before = self._verify_runtime_source()
         directory = self.cache.directory / "tasks" / identity.key / uuid.uuid4().hex
@@ -266,6 +296,7 @@ class StagedArtemisEvaluator(EvaluationAdapter):
                     raise TaskIncomplete("Singleton runner returned a mismatched task instance")
                 if not isinstance(episode.get("success"), bool):
                     raise TaskIncomplete("Singleton runner did not normalize binary success")
+                self._success(episode)
                 source_after = self._verify_runtime_source()
                 if source_before is not None:
                     write_json(output / "runtime_source_attestation.json", {"before": source_before, "after": source_after})
@@ -302,7 +333,7 @@ class StagedArtemisEvaluator(EvaluationAdapter):
                 if unhealthy:
                     error = (error + "; " if error else "") + "Bounded device cleanup could not be confirmed"
         elapsed = time.monotonic() - started
-        outcome = None if error else {"task_name": identity.template, "success": episode["success"],
+        outcome = None if error else {"task_name": identity.template, "success": self._success(episode),
                                       "seed": episode["seed"], "raw_reward": episode.get("androidworld_reward"),
                                       "outcome_status": episode.get("outcome_status"), "episode": episode,
                                       "evidence_root": str(output.resolve())}
@@ -364,7 +395,7 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         if tasks != [contract["template"]]:
             return None
         self._check_tasks(stage, tasks)
-        identity = self._identity(contract["artifact_id"], contract["template"], stage)
+        identity = self._identity(contract["artifact_id"], contract["template"], stage, contract.get("repetition", 0))
         if identity.key != row["job"]:
             return None
         configured = request.get("config", {})
@@ -378,7 +409,7 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         if summary["status"] != "completed":
             return None
         episode = summary["task_results"][0]
-        outcome = {"task_name": identity.template, "success": episode["success"], "seed": episode["seed"],
+        outcome = {"task_name": identity.template, "success": self._success(episode), "seed": episode["seed"],
                    "raw_reward": episode.get("androidworld_reward"), "outcome_status": episode.get("outcome_status"),
                    "episode": episode, "evidence_root": str(output.resolve())}
         return outcome, cleanup["lease_elapsed_seconds"], stage
@@ -436,27 +467,29 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         self._check_tasks(stage, tasks)
         if manifest(workspace) != self.artifacts.verify(artifact):
             raise TaskIncomplete("Stage input differs from immutable harness artifact")
+        if self._repetitions(stage) > 1:
+            return self._evaluate_until_failure(artifact, stage, tasks)
         self.prepare(artifact, {stage: tasks})
-        identities = [self._identity(artifact, task, stage) for task in tasks]
+        identities = self._identities(artifact, tasks, stage)
         batch = self.cache.register(self.owner, artifact, stage, tuple(identities))
         results, futures, errors = {}, {}, []
         for identity in identities:
             cached = self.cache.cached(identity, batch)
             if cached is not None:
-                results[identity.template] = cached
+                results[identity.key] = cached
             else:
                 try:
-                    futures[identity.template] = self._submit(identity, stage)
+                    futures[identity.key] = self._submit(identity, stage)
                 except Exception as failure:
                     errors.append(str(failure))
         pending = {future: (identity, 0) for identity in identities
-                   if (future := futures.get(identity.template)) is not None}
+                   if (future := futures.get(identity.key)) is not None}
         while pending:
             completed, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed:
                 identity, retry = pending.pop(future)
                 try:
-                    results[identity.template] = future.result()
+                    results[identity.key] = future.result()
                 except Exception as failure:
                     if retry:
                         errors.append(str(failure))
@@ -468,17 +501,52 @@ class StagedArtemisEvaluator(EvaluationAdapter):
         # Drain every admitted task before reporting an incomplete stage.
         if errors:
             raise TaskIncomplete("Stage remains incomplete: " + "; ".join(errors))
-        return StageEvidence(artifact, stage, {task: results[task]["success"] for task in tasks},
-                             tuple(results[task]["evidence_root"] for task in tasks))
+        samples = {task: tuple(results[identity.key]["success"] for identity in identities
+                               if identity.template == task) for task in tasks}
+        roots = tuple(results[identity.key]["evidence_root"] for identity in identities)
+        return StageEvidence(artifact, stage, {task: all(values) for task, values in samples.items()},
+                             roots, samples if self._repetitions(stage) > 1 else None)
+
+    def _evaluate_until_failure(self, artifact, stage, tasks):
+        """Admit the next fresh episode only after a trusted pass, including on resume."""
+        samples, roots = {}, []
+        for task in tasks:
+            values = []
+            for repetition in range(self._repetitions(stage)):
+                batch = self.prepare(artifact, {stage: (task,)}, repetition=repetition)[stage]
+                identity = self._identity(artifact, task, stage, repetition)
+                result = self.cache.cached(identity, batch)
+                if result is None:
+                    for retry in range(2):
+                        try:
+                            result = self._submit(identity, stage).result()
+                            break
+                        except Exception as failure:
+                            if retry:
+                                raise TaskIncomplete(f"Stage remains incomplete: {failure}") from failure
+                values.append(result["success"])
+                roots.append(result["evidence_root"])
+                if not result["success"]:
+                    break
+            samples[task] = tuple(values)
+        return StageEvidence(artifact, stage, {task: all(values) for task, values in samples.items()},
+                             tuple(roots), samples)
 
     def verify_stage(self, evidence):
         self._verify_runtime_source()
         self._check_tasks(evidence.stage, tuple(evidence.outcomes))
+        evidence.validate_repetitions(self._repetitions(evidence.stage))
         roots = []
         for task, success in evidence.outcomes.items():
-            result = self.cache.cached(self._identity(evidence.artifact_id, task, evidence.stage))
-            if result is None or result["success"] != success:
-                raise TaskIncomplete("Persisted stage no longer matches its canonical task cache")
-            roots.append(result["evidence_root"])
+            values = []
+            count = len(evidence.samples[task]) if evidence.samples is not None else 1
+            for repetition in range(count):
+                result = self.cache.cached(self._identity(evidence.artifact_id, task, evidence.stage, repetition))
+                if result is None:
+                    raise TaskIncomplete("Persisted stage lacks a completed repetition")
+                values.append(result["success"])
+                roots.append(result["evidence_root"])
+            if all(values) != success or (evidence.samples is not None and tuple(evidence.samples[task]) != tuple(values)):
+                raise TaskIncomplete("Persisted stage no longer matches its repetition cache")
         if set(roots) != set(evidence.evidence):
             raise TaskIncomplete("Persisted stage evidence references changed")

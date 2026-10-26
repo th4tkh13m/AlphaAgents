@@ -1493,7 +1493,7 @@ def test_score_report_handles_unequal_task_weights_and_unknown_judge_dimension(t
     try:
         evidence = StageEvidence("artifact", "s0", {"easy": True, "hard": False}, ("canonical-trace",))
         store.save_evaluation(evidence.identity, "artifact", "s0", {
-            "artifact_id": "artifact", "stage": "s0", "outcomes": dict(evidence.outcomes), "evidence": list(evidence.evidence)})
+            "artifact_id": "artifact", "stage": "s0", "outcomes": dict(evidence.outcomes), "evidence": list(evidence.evidence), "samples": None})
         dimensions = {"robustness": {"score": None, "rationale": "No recovery behavior witnessed",
             "confidence": "low", "unknown_reason": "No recovery trajectory supplied"},
             "decisions": {"score": .25, "rationale": "Weak grounding", "confidence": "medium", "evidence": ["canonical-trace"]},

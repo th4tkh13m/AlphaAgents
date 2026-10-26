@@ -2,9 +2,16 @@
 
 This invocation belongs to a search that optimizes one frozen benchmark task
 instance. Identify that task from `utility_context.evaluation_task`, or from the
-sole canonical outcome when reviewing execution. Its canonical success has weight
-one. There is no separate Screen stage and no multi-task Selection stage in this
-search. Canonical task failure is an observed zero, not invalid execution. Missing
+canonical outcomes when reviewing execution. By default, each artifact receives
+up to three fresh executions of the same task instance, sequentially. Stop
+evaluating that artifact at its first measured task failure. Only a pass admits
+the next repetition. Utility U is the pass fraction over actual executions
+(0/1, 1/2, 2/3, or 3/3), with weight one. Do not count unexecuted repetitions
+as failures or claim that this adaptively stopped fraction is an unbiased
+reliability estimate. The supplied
+`evaluation_repetitions` is authoritative when configured differently. Each
+repetition has distinct evidence; cache reuse is not an additional execution.
+There is no separate Screen stage and no multi-task Selection stage in this search. Each canonical task failure is an observed zero, not invalid execution. Missing
 or infrastructure-invalid results are unavailable observations, never task failures.
 Targeted engineering checks remain diagnostic and never replace canonical scoring.
 
@@ -33,9 +40,11 @@ depth, rollout, and implementation limits and decides when the task's winner can
 be frozen. Use supplied capacity and continuation contracts where relevant to
 your role; do not assume fixed numeric limits when they are not supplied. Actual
 execution limits do not truncate the value estimator's continuing prediction.
-When the configured success-stop policy is enabled, canonical task success
-with effective J at least the original task-tree root J ends new search
-admission. A completed review is required, and confirmed manipulation disqualifies
+When the configured success-stop policy is enabled, passing every required
+canonical repetition with effective J strictly greater than the original task-tree
+root J ends new search admission. A root may bypass search only after passing all
+its own required repetitions and receiving a usable review; it is not compared
+strictly against itself. A completed review is required, and confirmed manipulation disqualifies
 the candidate. The controller drains admitted work and selects a qualifying
 harness. Without a qualifying success, it searches to its configured limits and
 selects by observed combined score. Backed-up predicted continuation guides

@@ -18,7 +18,7 @@ def test_single_task_thirty_rollouts_reach_depth_eight_without_screen_or_promoti
     source.mkdir()
     (source / 'controller.py').write_text('value = 0\n')
     task = 'OnlyTask'
-    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task=task,
+    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task=task, evaluation_repetitions=1,
                              max_trials=30, max_depth=8, max_new_attempts_per_trial=8, stop_on_task_success=False,
                              max_attempts=240, trial_workers=4, device_limit=4)
     evaluator, gateway = Evaluator(), Gateway()
@@ -54,7 +54,7 @@ def test_single_task_depth_allowance_does_not_change_multitask_limits():
     base = FixedPUCTConfig(screen_gate='execution_valid')
     with pytest.raises(ValueError):
         replace(base, max_new_attempts_per_trial=8)
-    single = replace(base, evaluation_task='Task', max_new_attempts_per_trial=8, max_attempts=240)
+    single = replace(base, evaluation_task='Task', evaluation_repetitions=1, max_new_attempts_per_trial=8, max_attempts=240)
     assert single.max_new_attempts_per_trial == 8
     with pytest.raises(ValueError):
         replace(single, max_depth=9)
@@ -158,7 +158,7 @@ def test_single_task_winner_verifies_cached_evidence_before_freezing_choice(tmp_
     (source / 'controller.py').write_text('value = 1\n')
     artifacts = ArtifactStore(tmp_path / 'artifacts')
     artifact = artifacts.freeze(source)
-    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', max_trials=2)
+    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', evaluation_repetitions=1, max_trials=2)
     store = TreeStore(tmp_path / 'tree', config, Objective('task', 'rubric', 'judge'))
     class CheckingEvaluator(Evaluator):
         invalid = True
@@ -244,7 +244,7 @@ def passing_root_coordinator(tmp_path, value=1):
     source = tmp_path / 'source'
     source.mkdir()
     (source / 'controller.py').write_text(f'value = {value}\n')
-    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', max_trials=1)
+    config = FixedPUCTConfig(screen_gate='execution_valid', evaluation_task='Task', evaluation_repetitions=1, max_trials=1)
     gateway, evaluator = Gateway(), Evaluator()
     search = FixedPUCTCoordinator(source, tmp_path / 'tree', config, Objective('single', 'rubric', 'judge'),
         gateway, evaluator, RoleSettings('configured-model', 'low'), (), {'Task': 1.0}, ('Task',), {})

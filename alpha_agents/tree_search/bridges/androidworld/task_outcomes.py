@@ -1,12 +1,44 @@
 """Identify agent failures without treating evaluator failures as scores."""
 
+from pathlib import Path
+
+
+def candidate_exception_origin(exc, agent_root):
+    """Attribute an exception to a candidate raise site, not its caller frames.
+
+    Transport and OS failures remain infrastructure errors even when raised
+    through candidate code. The trusted runner supplies the immutable root.
+    """
+    if agent_root is None:
+        return None
+    current, seen = exc, set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        module = type(current).__module__
+        if isinstance(current, OSError) or module.split('.')[0] in {
+            'httpx', 'httpcore', 'aiohttp', 'grpc', 'requests', 'openai',
+        }:
+            return None
+        current = current.__cause__ or current.__context__
+    trace = exc.__traceback__
+    if trace is None:
+        return None
+    while trace.tb_next is not None:
+        trace = trace.tb_next
+    source = Path(trace.tb_frame.f_code.co_filename).resolve()
+    root = (Path(agent_root) / 'artemis').resolve()
+    if not source.is_relative_to(root):
+        return None
+    return {"source": source.relative_to(root).as_posix(),
+            "exception_type": type(exc).__name__}
+
 
 class MissingAgentAnswerError(ValueError):
     """The agent supplied no usable answer for an information-retrieval task."""
 
 
-def bounded_agent_failure(exc, phase):
-    """Score known agent failures while rejecting unknown integration errors."""
+def bounded_agent_failure(exc, phase, *, agent_root=None):
+    """Classify bounded failures and candidate-local raise sites; preserve outages."""
     if phase == "answer_submission" and isinstance(exc, MissingAgentAnswerError):
         kind = "missing_answer"
     elif phase != "agent_execution":
@@ -19,7 +51,10 @@ def bounded_agent_failure(exc, phase):
     ):
         kind = "execution_limit"
     else:
-        return {}
+        origin = candidate_exception_origin(exc, agent_root)
+        if origin is None:
+            return {}
+        kind = "candidate_exception"
     return {
         "outcome_status": "agent_failed",
         "failure_phase": phase,
@@ -28,6 +63,7 @@ def bounded_agent_failure(exc, phase):
         "artemis_error": f"{type(exc).__name__}: {exc}",
         # The grader did not run. Do not invent an AndroidWorld reward.
         "androidworld_reward": None,
+        **({"failure_origin": origin} if kind == "candidate_exception" else {}),
     }
 
 
@@ -43,6 +79,16 @@ def is_bounded_agent_failure(episode):
         "execution_limit": "GraphRecursionError:",
         "missing_answer": "MissingAgentAnswerError:",
     }.get(kind)
+    if kind == "candidate_exception":
+        origin = episode.get("failure_origin", {})
+        if not isinstance(origin, dict):
+            return False
+        source, name = origin.get("source"), origin.get("exception_type")
+        if (not isinstance(source, str) or not source or Path(source).is_absolute()
+                or '..' in Path(source).parts or not isinstance(name, str)
+                or not name.isidentifier()):
+            return False
+        expected = name + ":"
     return bool(
         expected
         and error.startswith(expected)

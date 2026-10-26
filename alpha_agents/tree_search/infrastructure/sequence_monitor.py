@@ -60,12 +60,12 @@ class SequenceMonitor:
                 lines += ["", f"## Active task: {step['task']}", "",
                           f"Trials: `{json.dumps(trials)}`. Backups: **{backups}/{active_limit}**. Maximum stored depth: **{depth}**.",
                           f"Implementations: `{json.dumps(attempts)}`.", f"Role invocations: `{json.dumps(roles)}`.", "",
-                          "| Artifact | Depth | Task U | Judge J | Combined F |", "| --- | ---: | ---: | ---: | ---: |"]
+                          "| Artifact | Depth | Observed U | Judge J | Combined F |", "| --- | ---: | ---: | ---: | ---: |"]
                 for row in connection.execute("SELECT artifact,depth,score FROM nodes WHERE eligible=1 ORDER BY depth,id"):
                     score = json.loads(row["score"])
                     weight = score["objective"]["judge_weight"]
                     combined = (1 - weight) * score["u"] + weight * score["j"]
-                    lines.append(f"| `{row['artifact'][:12]}` | {row['depth']} | {score['u']:.0f} | {score['j']:.4f} | {combined:.4f} |")
+                    lines.append(f"| `{row['artifact'][:12]}` | {row['depth']} | {score['u']:.3f} | {score['j']:.4f} | {combined:.4f} |")
                 for row in connection.execute("SELECT device,job,reason FROM device_faults ORDER BY recorded,id"):
                     errors.append(dict(row))
                 lines += ["", f"Task execution attempts: `{json.dumps(counts('task_runs'))}`.", "",

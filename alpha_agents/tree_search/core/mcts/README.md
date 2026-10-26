@@ -542,9 +542,33 @@ rewritten or garbage-collected by upgrading the runtime.
 ### Single-task success stopping
 
 For a fresh single-task search, `stop_on_task_success` defaults to `true`.
-A candidate qualifies when its sealed canonical task outcome is successful
-(`U=1`), its completed effective judge score is at least the task tree's original
-root judge score, and its review does not confirm evaluation manipulation.
+Single-task evaluation defaults to `evaluation_repetitions=3`. Every repetition
+executes the same seeded task instance in a fresh runner workspace and task reset,
+with its own cache identity and immutable evidence. U is the observed full-pass
+fraction over actual executions (0/1, 1/2, 2/3, or 3/3). Run repetitions
+sequentially and stop at the first measured failure. Only preceding passes
+admit later repetitions; skipped repetitions are not recorded as failures.
+This adaptively stopped fraction is not an unbiased reliability estimate.
+Resume reuses completed repetition slots and runs only missing slots. Each slot
+retains the existing initial execution plus one infrastructure retry; a retry is
+not an extra vote and a measured failure is never resampled. A trusted bounded
+agent failure is an observed non-completion even if grading was not reached;
+its absent raw reward is preserved. Exceptions raised inside candidate `artemis/`
+source during agent execution are also terminal agent failures, with their raise-site
+provenance retained and no fabricated AndroidWorld reward. OS/transport exceptions
+(including chained transport causes), external raise sites and setup/grading/cleanup
+errors remain unavailable infrastructure/evaluator outcomes. Infrastructure-invalid runs remain unavailable
+and do not fill a repetition slot. Targeted diagnostics
+remain separate, single-run observations and cannot fill canonical slots.
+
+A child qualifies only when every required repetition passes AndroidWorld
+(`U=1`), its completed effective judge score is strictly greater than the task
+tree's original root judge score, and its review does not confirm manipulation.
+A passing root can skip search after all repetitions pass and a usable review;
+root self-comparison does not require an impossible strict improvement.
+The judge reviews the aggregate evidence once per artifact, including all samples.
+`evaluation_repetitions` is a frozen integer setting from 1 to 3 (default 3);
+non-single-task evaluation retains one execution per task.
 The baseline remains the original root throughout that task. Scores and snapshot
 identities are checked against their persisted canonical outcome and judge reports;
 missing, partial, or contradictory evidence cannot trigger this rule. A qualifying

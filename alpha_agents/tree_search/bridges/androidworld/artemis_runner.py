@@ -432,7 +432,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         failure_phase=failure_phase,
                         seconds=round(time.time() - started, 2),
                     )
-                    task_record.update(bounded_agent_failure(exc, failure_phase))
+                    task_record.update(bounded_agent_failure(exc, failure_phase, agent_root=ARTEMIS_ROOT))
                     failures += 1
                 finally:
                     begin_cleanup()

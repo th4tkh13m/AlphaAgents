@@ -68,7 +68,7 @@ class Finalizer:
         prior = self.store.db.execute("SELECT payload FROM evaluation_snapshots WHERE artifact=? AND stage='selection' ORDER BY rowid LIMIT 1", (artifact,)).fetchone()
         if prior:
             data = json.loads(prior[0])
-            evidence = StageEvidence(artifact, "selection", data["outcomes"], tuple(data["evidence"]))
+            evidence = StageEvidence(artifact, "selection", data["outcomes"], tuple(data["evidence"]), data.get("samples"))
             self.evaluator.verify_stage(evidence)
         else:
             workspace = self.store.directory / "workspaces" / ("final-" + artifact)

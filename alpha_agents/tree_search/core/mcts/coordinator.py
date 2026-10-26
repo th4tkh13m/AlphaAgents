@@ -131,7 +131,7 @@ class FixedPUCTCoordinator:
             if row is None:
                 raise ValueError("Passing root requires its canonical observation")
             payload = json.loads(row[0])
-            evidence = StageEvidence(payload["artifact_id"], payload["stage"], payload["outcomes"], tuple(payload["evidence"]))
+            evidence = StageEvidence(payload["artifact_id"], payload["stage"], payload["outcomes"], tuple(payload["evidence"]), payload.get("samples"))
             evidence.validate_tasks((task,))
             if evidence.artifact_id != score.artifact_id or evidence.identity != score.u_snapshot_id or evidence.outcomes != {task: True}:
                 raise ValueError("Passing root must match its canonical observation")
@@ -143,7 +143,9 @@ class FixedPUCTCoordinator:
                       "search_skipped": True, "task": task, "winner": {"artifact_id": score.artifact_id, "score": asdict(score)},
                       "selected_actions": [], "completed_rollouts": self.store.db.execute("SELECT count(*) FROM backups").fetchone()[0],
                       "configured_rollouts": self.config.max_trials, "confirmed": False,
-                      "reason": "Fresh canonical root already succeeds on this task"}
+                      "evaluation_repetitions": self.config.evaluation_repetitions,
+                      "samples": evidence.samples,
+                      "reason": "Root passes every required canonical repetition with a usable review"}
             write_json(self.directory / "root_handoff.json", result)
             return result
 

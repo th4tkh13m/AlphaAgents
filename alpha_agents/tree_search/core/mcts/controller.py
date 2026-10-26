@@ -97,7 +97,7 @@ def canonical_judge_context(s0: StageEvidence, tasks: tuple[str, ...]) -> dict:
             records.append({**item, "absolute_file": str(root / item["path"]),
                             "reference_id": f"s0-file-{file_number:04d}"})
         catalog.append({"evidence_root_path": reference, "files": records})
-    return {"snapshot_id": s0.identity, "outcomes": dict(s0.outcomes),
+    return {"snapshot_id": s0.identity, "outcomes": dict(s0.outcomes), "samples": s0.samples, "pass_rates": s0.rates,
             "evidence": evidence, "task_review_order": review,
             "file_catalog": catalog, "sqlite_inspection": inspections}
 
@@ -143,7 +143,9 @@ class TrialExecutor:
             context = {**context, "utility_context": {
                 "version": "weighted-canonical-combined-v2", "s0_task_weights": self.s0_weights,
                 "judge_weight": self.store.objective.judge_weight,
-                "evaluation_task": self.store.config.evaluation_task}}
+                "evaluation_task": self.store.config.evaluation_task,
+                "evaluation_repetitions": self.store.config.evaluation_repetitions if self.store.config.evaluation_task else 1,
+                "success_measure": "observed pass fraction; sequential canonical repetitions stop at first measured failure"}}
         if role == "policy":
             policy = self.store.continuation_policy()
             context = {**context, "discount_factor": policy["discount_factor"],
@@ -375,8 +377,10 @@ class TrialExecutor:
         row = self.store.db.execute("SELECT payload FROM evaluation_snapshots WHERE artifact=? AND stage=? ORDER BY rowid LIMIT 1", (artifact, stage)).fetchone()
         if row:
             payload = json.loads(row[0])
-            evidence = StageEvidence(payload["artifact_id"], payload["stage"], payload["outcomes"], tuple(payload["evidence"]))
+            evidence = StageEvidence(payload["artifact_id"], payload["stage"], payload["outcomes"], tuple(payload["evidence"]), payload.get("samples"))
             evidence.validate_tasks(tasks)
+            if self.store.config.evaluation_task and stage == "s0":
+                evidence.validate_repetitions(self.store.config.evaluation_repetitions)
             try:
                 self.evaluator.verify_stage(evidence)
             except OwnershipError:
@@ -392,6 +396,8 @@ class TrialExecutor:
         except (RuntimeError, OSError) as error:
             raise EvaluationPending(f"{stage} evaluation unavailable: {error}") from error
         evidence.validate_tasks(tasks)
+        if self.store.config.evaluation_task and stage == "s0":
+            evidence.validate_repetitions(self.store.config.evaluation_repetitions)
         if evidence.artifact_id != artifact or evidence.stage != stage:
             raise ValueError("Stage outcome identity mismatch")
         if self.artifacts.freeze(workspace) != artifact:
@@ -562,7 +568,7 @@ class TrialExecutor:
             if existing["canonical_id"] != s0.identity:
                 raise ValueError("Canonical judge identifies another frozen evaluation")
             j, _ = review_score(json.loads(existing["payload"]))
-            u = sum(self.s0_weights[t] * outcome for t, outcome in s0.outcomes.items())
+            u = sum(self.s0_weights[t] * outcome for t, outcome in s0.rates.items())
             return CombinedScore(artifact, s0.identity, existing["id"], self.store.objective, u, j)
         timing = AssessmentTiming(self.store, owner, artifact)
         state = "failed"
@@ -611,7 +617,7 @@ class TrialExecutor:
             raise AssessmentPending("Final judge unavailable; preserve evaluation evidence") from error
         finally:
             timing.mark("review_finish")
-        u = sum(self.s0_weights[task] * outcome for task, outcome in s0.outcomes.items())
+        u = sum(self.s0_weights[task] * outcome for task, outcome in s0.rates.items())
         judge_id = self.store.save_judge(artifact, s0.identity, final)
         canonical_judge = json.loads(self.store.db.execute("SELECT payload FROM judge_snapshots WHERE id=?", (judge_id,)).fetchone()[0])
         j, _ = review_score(canonical_judge)

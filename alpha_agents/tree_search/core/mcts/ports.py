@@ -94,14 +94,38 @@ class StageEvidence:
     stage: str
     outcomes: Mapping[str, bool]
     evidence: tuple[str, ...]
+    samples: Mapping[str, tuple[bool, ...]] | None = None
 
     def __post_init__(self):
         if not self.artifact_id or self.stage not in {"screen", "s0", "selection", "targeted"}:
             raise ValueError("Exact artifact and permitted evaluation stage required")
         if any(not isinstance(outcome, bool) for outcome in self.outcomes.values()):
             raise ValueError("Stage evidence contains normalized binary successes only")
+        if self.samples is not None:
+            if set(self.samples) != set(self.outcomes):
+                raise ValueError("Repetition samples must cover exactly the stage tasks")
+            for task, samples in self.samples.items():
+                if not samples or any(not isinstance(value, bool) for value in samples):
+                    raise ValueError("Repetition outcomes must be nonempty binary samples")
+                if self.outcomes[task] != all(samples):
+                    raise ValueError("Stage success requires all repetitions to pass")
         if not self.evidence:
             raise ValueError("A completed stage requires trusted evidence references")
+
+    @property
+    def rates(self):
+        return {task: sum(values) / len(values) for task, values in self.samples.items()} if self.samples is not None else dict(self.outcomes)
+
+    def validate_repetitions(self, count):
+        if count == 1 and self.samples is None:
+            return
+        if self.samples is None or any(
+            not (len(values) == count or (0 < len(values) < count and values[-1] is False and all(values[:-1])))
+            for values in self.samples.values()
+        ):
+            raise ValueError("Stage lacks the required fresh repetition outcomes")
+        if len(self.evidence) != sum(len(values) for values in self.samples.values()) or len(set(self.evidence)) != len(self.evidence):
+            raise ValueError("Repetitions require distinct trusted execution evidence roots")
 
     def validate_tasks(self, tasks):
         if set(self.outcomes) != set(tasks) or len(tasks) != len(set(tasks)):

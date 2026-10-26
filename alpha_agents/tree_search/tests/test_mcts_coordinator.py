@@ -240,7 +240,7 @@ def test_complete_finalization_uses_android_utility_even_when_combined_score_dis
         with coordinator.store.transaction():
             coordinator.store.db.execute("DELETE FROM evaluation_snapshots WHERE artifact=? AND stage='selection'", (candidate["artifact_id"],))
         coordinator.store.save_evaluation(evidence.identity, candidate["artifact_id"], "selection",
-            {"artifact_id": evidence.artifact_id, "stage": evidence.stage, "outcomes": evidence.outcomes, "evidence": evidence.evidence})
+            {"artifact_id": evidence.artifact_id, "stage": evidence.stage, "outcomes": evidence.outcomes, "evidence": evidence.evidence, "samples": None})
     final = coordinator.finalize()
     assert final["winner"]["artifact_id"] == candidates[-1]["artifact_id"]
     assert final["winner"]["utility"] == 1

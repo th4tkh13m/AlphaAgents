@@ -45,6 +45,7 @@ class TaskIdentity:
     runtime_limits: dict
     instance_index: int = 0
     sample_kind: str = "canonical"
+    repetition: int = 0
 
     def __post_init__(self):
         if not all((self.artifact_id, self.template, self.model_revision, self.evaluator_revision, self.fixture_identity)):
@@ -55,6 +56,8 @@ class TaskIdentity:
             raise ValueError("Runner configuration and runtime limits must be part of cache identity")
         if self.sample_kind not in {"canonical", "targeted"}:
             raise ValueError("Separate canonical benchmark samples from targeted diagnostics")
+        if isinstance(self.repetition, bool) or not isinstance(self.repetition, int) or self.repetition < 0:
+            raise ValueError("Repetition must be a nonnegative integer")
         canonical_json(asdict(self))
 
     @property
@@ -101,8 +104,8 @@ class TaskCache:
     def register(self, owner: str, artifact: str, stage: str, identities: tuple[TaskIdentity, ...]):
         if stage not in {"screen", "s0", "targeted", "selection"}:
             raise ValueError("Confirmation is excluded from V1 task admission")
-        if not owner or not identities or len({i.template for i in identities}) != len(identities):
-            raise ValueError("Register a nonempty batch of unique task templates")
+        if not owner or not identities or len({(i.template, i.repetition) for i in identities}) != len(identities):
+            raise ValueError("Register a nonempty batch of unique task/repetition identities")
         if any(i.artifact_id != artifact for i in identities):
             raise ValueError("Task batch artifact mismatch")
         tasks, jobs = [i.template for i in identities], [i.key for i in identities]

@@ -14,7 +14,8 @@
     "device_limit": 4,
     "max_plans": 3,
     "max_implementations": 2,
-    "stop_on_task_success": true
+    "stop_on_task_success": true,
+    "evaluation_repetitions": 3
   },
   "harness": {
     "type": "androidworld",
